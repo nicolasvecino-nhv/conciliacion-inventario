@@ -6,8 +6,8 @@ from io import BytesIO
 
 st.set_page_config(layout="wide", page_title="Conciliación Fusion vs Infolog")
 
-st.title("📊 Dashboard de Comparativa de Inventario")
-st.markdown("Comparación entre **Fusion (Fatima)** e **Infolog**")
+st.title("📊 SnapShot Fusion Infolog")
+st.markdown("Comparación entre **Fusion** e **Infolog** para **NEWPGA**")
 
 # --- FUNCIONES DE MEMORIA (OPCIÓN 2) ---
 # Guardamos los resultados en un archivo tipo 'pickle' que Python lee muy rápido

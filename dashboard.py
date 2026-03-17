@@ -159,22 +159,26 @@ if comparativa is not None:
 
     with tab2:
         st.subheader("🔍 Control de Mapeo de Estatus")
-        st.write("Usa esta tabla para verificar si los códigos de Infolog se están traduciendo correctamente.")
+        st.write("Usa esta tabla para verificar cómo se agruparon los estatus.")
         
-        # Creamos una tabla comparativa de los estatus de Infolog
-        if 'STATUS_ORIGINAL' in df_info.columns:
-            # Quitamos duplicados para ver solo las combinaciones únicas
-            chequeo_mapeo = df_info[['STATUS_ORIGINAL', 'STATUS']].drop_duplicates().sort_values('STATUS_ORIGINAL')
-            
-            # Renombramos para que sea más claro en pantalla
-            chequeo_mapeo.columns = ['Código en Infolog (Original)', 'Se muestra en Dashboard como:']
-            
-            st.dataframe(chequeo_mapeo, use_container_width=True, hide_index=True)
-            
-            st.info("""
-            **Tip para validación:**
-            Si ves que un código en la columna izquierda no tiene su equivalente correcto a la derecha, 
-            debes agregarlo a la lista `mapeo_estatus` en tu código de GitHub.
-            """)
-        else:
-            st.warning("No se pudo cargar la comparativa. Asegúrate de haber subido el archivo de Infolog.")
+        # Intentamos obtener la info de los archivos recién subidos
+        # Si no existen (porque cargamos de memoria), usamos la tabla comparativa
+        try:
+            if 'df_info' in locals():
+                # Si acabamos de subir los archivos
+                chequeo_mapeo = df_info[['STATUS_ORIGINAL', 'STATUS']].drop_duplicates().sort_values('STATUS_ORIGINAL')
+                chequeo_mapeo.columns = ['Código en Infolog (Original)', 'Se muestra en Dashboard como:']
+                st.dataframe(chequeo_mapeo, use_container_width=True, hide_index=True)
+            else:
+                # Si estamos viendo datos viejos guardados en memoria
+                st.info("Mostrando estatus unificados de la última carga guardada:")
+                resumen_status = comparativa[['STATUS']].drop_duplicates().sort_values('STATUS')
+                st.dataframe(resumen_status, use_container_width=True, hide_index=True)
+        except Exception as e:
+            st.warning("No se puede mostrar el detalle del mapeo en este momento.")
+
+        st.info("""
+        **Tip para validación:**
+        Si ves que un código no tiene su equivalente correcto, debes agregarlo a la lista `mapeo_estatus` 
+        en tu código de GitHub y volver a subir los archivos.
+        """)

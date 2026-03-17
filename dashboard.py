@@ -39,9 +39,17 @@ mapeo_estatus = {
 }
 
 if file_fusion and file_infolog:
-    # 1. Carga de datos
-    df_fusion = pd.read_csv(file_fusion, encoding='latin-1', sep=None, engine='python') 
-    df_info = pd.read_csv(file_infolog, encoding='latin-1', sep=None, engine='python')
+    # 1. CARGA DE DATOS USANDO EXCEL DIRECTAMENTE
+    # Intentamos leer como Excel, si falla (porque es un CSV real), lee como CSV
+    try:
+        df_fusion = pd.read_excel(file_fusion)
+    except:
+        df_fusion = pd.read_csv(file_fusion, encoding='latin-1', sep=None, engine='python')
+    
+    try:
+        df_info = pd.read_excel(file_infolog)
+    except:
+        df_info = pd.read_csv(file_infolog, encoding='latin-1', sep=None, engine='python')
 
     # 2. LIMPIEZA DE FUSION
     df_fusion = df_fusion.rename(columns={

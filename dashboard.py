@@ -1,11 +1,23 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import os
+from io import BytesIO
 
 st.set_page_config(layout="wide", page_title="Conciliación Fusion vs Infolog")
 
 st.title("📊 Dashboard de Comparativa de Inventario")
 st.markdown("Comparación entre **Fusion (Fatima)** e **Infolog**")
+
+# --- FUNCIONES DE MEMORIA (OPCIÓN 2) ---
+# Guardamos los resultados en un archivo tipo 'pickle' que Python lee muy rápido
+def guardar_en_memoria(df):
+    df.to_pickle("ultima_comparativa.pkl")
+
+def cargar_de_memoria():
+    if os.path.exists("ultima_comparativa.pkl"):
+        return pd.read_pickle("ultima_comparativa.pkl")
+    return None
 
 # --- CARGA DE ARCHIVOS ---
 st.sidebar.header("Carga de Datos")
@@ -13,7 +25,6 @@ file_fusion = st.sidebar.file_uploader("1. Subir Detalle de Inventario Fatima (F
 file_infolog = st.sidebar.file_uploader("2. Subir Reporte m90 (Infolog)", type=['xlsx', 'csv'])
 
 # --- ESPACIO PARA TUS EQUIVALENCIAS ---
-# Instrucciones: 'Valor en Infolog': 'Valor en Fusion'
 mapeo_estatus = {
     'REQ': 'RevisionDA',
     'CA2': 'Canal 2',
@@ -30,18 +41,15 @@ mapeo_estatus = {
     'DPG': 'Deposito',
     'DAN': 'Deposito',
     'VAC': 'Deposito',
-    'IVT': 'Deposito',
-    'VIC': 'Deposito',
-    'REM': 'Deposito',
-    'VEN': 'Deposito',
-    'nan': 'Deposito', 
+    'nan': 'Deposito',
     '': 'Deposito'
-       
 }
 
+comparativa = None
+
+# Si el usuario sube AMBOS archivos, procesamos de nuevo
 if file_fusion and file_infolog:
-    # 1. CARGA DE DATOS USANDO EXCEL DIRECTAMENTE
-    # Intentamos leer como Excel, si falla (porque es un CSV real), lee como CSV
+    # 1. Carga de datos
     try:
         df_fusion = pd.read_excel(file_fusion)
     except:
@@ -60,7 +68,7 @@ if file_fusion and file_infolog:
         'Existencias físicas secundarias': 'CANT_FUSION'
     })
 
-    # 3. LIMPIEZA DE INFOLOG Y TRADUCCIÓN DE ESTATUS
+    # 3. LIMPIEZA DE INFOLOG Y TRADUCCIÓN
     df_info = df_info.rename(columns={
         'CODPRO': 'SKU',
         'CODLOT': 'LOTE',
@@ -68,11 +76,11 @@ if file_fusion and file_infolog:
         'CAJAS': 'CANT_INFOLOG'
     })
 
-    # Aplicamos la tabla de equivalencias
-    # .strip() elimina espacios invisibles antes de buscar en la tabla
-    df_info['STATUS'] = df_info['STATUS_ORIGINAL'].astype(str).str.strip().map(mapeo_estatus).fillna(df_info['STATUS_ORIGINAL'].astype(str).str.strip())
+    # Forzar vacíos a 'Deposito' antes del mapeo
+    df_info['STATUS_ORIGINAL'] = df_info['STATUS_ORIGINAL'].astype(str).str.strip().replace(['nan', 'None', ''], 'Deposito')
+    df_info['STATUS'] = df_info['STATUS_ORIGINAL'].map(mapeo_estatus).fillna(df_info['STATUS_ORIGINAL'])
 
-    # 4. NORMALIZACIÓN DE TEXTOS (SKU y Lote)
+    # 4. NORMALIZACIÓN CRÍTICA
     for df in [df_fusion, df_info]:
         df['SKU'] = df['SKU'].astype(str).str.strip()
         df['LOTE'] = df['LOTE'].astype(str).str.strip()
@@ -94,17 +102,30 @@ if file_fusion and file_infolog:
 
     comparativa['Tipo Error'] = comparativa.apply(clasificar, axis=1)
 
-    # --- MÉTRICAS ---
+    # GUARDAR EN MEMORIA PARA LA PRÓXIMA VEZ
+    guardar_en_memoria(comparativa)
+    st.sidebar.success("✅ Datos procesados y guardados en memoria.")
+
+else:
+    # Si no hay archivos subidos, intentamos cargar lo último que se guardó
+    comparativa = cargar_de_memoria()
+    if comparativa is not None:
+        st.sidebar.info("ℹ️ Mostrando última consulta guardada.")
+    else:
+        st.info("👋 Bienvenido. Por favor, sube los archivos en la barra lateral para comenzar.")
+
+# --- VISUALIZACIÓN DE RESULTADOS ---
+if comparativa is not None:
+    # MÉTRICAS
     col1, col2, col3, col4 = st.columns(4)
     total_lineas = len(comparativa)
     iguales = len(comparativa[comparativa['Diferencia'] == 0])
     
     col1.metric("Conciliación (%)", f"{(iguales/total_lineas)*100:.2f}%")
-    col2.metric("Total Cajas Fusion", f"{comparativa['CANT_FUSION'].sum():,.0f}")
-    col3.metric("Total Cajas Infolog", f"{comparativa['CANT_INFOLOG'].sum():,.0f}")
-    col4.metric("Diferencia Neta", f"{comparativa['Diferencia'].sum():,.0f}")
+    col2.metric("Total Fusion", f"{comparativa['CANT_FUSION'].sum():,.0f}")
+    col3.metric("Total Infolog", f"{comparativa['CANT_INFOLOG'].sum():,.0f}")
+    col4.metric("Dif. Neta", f"{comparativa['Diferencia'].sum():,.0f}")
 
-    # --- CUERPO DEL DASHBOARD ---
     tab1, tab2 = st.tabs(["📊 Análisis General", "🔍 Verificador de Estatus"])
 
     with tab1:
@@ -115,13 +136,23 @@ if file_fusion and file_infolog:
 
         st.subheader("Detalle de Diferencias (Solo errores)")
         solo_errores = comparativa[comparativa['Diferencia'] != 0].sort_values(by='Diferencia', ascending=False)
+        
+        # --- FUNCIÓN PARA DESCARGAR EXCEL ---
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            solo_errores.to_excel(writer, index=False, sheet_name='Errores_Inventario')
+        processed_data = output.getvalue()
+
+        st.download_button(
+            label="📥 Descargar Errores en Excel (.xlsx)",
+            data=processed_data,
+            file_name="errores_inventario_conciliacion.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+        
         st.dataframe(solo_errores, use_container_width=True)
 
     with tab2:
         st.subheader("Control de Mapeo")
-        st.write("Estos son los estatus originales encontrados en Infolog y cómo se están traduciendo:")
-        resumen_mapeo = df_info[['STATUS_ORIGINAL', 'STATUS']].drop_duplicates()
-        st.table(resumen_mapeo)
-
-else:
-    st.info("👋 Bienvenido. Por favor, sube los archivos en la barra lateral para procesar la información.")
+        st.write("Muestra cómo se están agrupando los estatus actualmente.")
+        st.dataframe(comparativa[['STATUS']].drop_duplicates())

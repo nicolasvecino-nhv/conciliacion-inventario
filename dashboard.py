@@ -8,49 +8,44 @@ st.title("📊 Dashboard de Comparativa de Inventario")
 st.markdown("Comparación entre **Fusion (Fatima)** e **Infolog**")
 
 # --- CARGA DE ARCHIVOS ---
-# En la web, el usuario subiría los archivos directamente
 file_fusion = st.sidebar.file_uploader("Subir Detalle de Inventario Fatima (Fusion)", type=['xlsx', 'csv'])
 file_infolog = st.sidebar.file_uploader("Subir Reporte m90 (Infolog)", type=['xlsx', 'csv'])
 
 if file_fusion and file_infolog:
-# 1. Carga con detección de separador y codificación para evitar errores
+    # 1. Carga de datos
     df_fusion = pd.read_csv(file_fusion, encoding='latin-1', sep=None, engine='python') 
     df_info = pd.read_csv(file_infolog, encoding='latin-1', sep=None, engine='python')
 
-# 2. LIMPIEZA DE FUSION (Archivo: Detalle de Invetario Fatima)
-# Nombres exactos de tus columnas: Artículo, Lote, Subinventario, Existencias físicas secundarias
+    # 2. LIMPIEZA DE FUSION
     df_fusion = df_fusion.rename(columns={
-    'Artículo': 'SKU',
-    'Lote': 'LOTE',
-    'Subinventario': 'STATUS',
-    'Existencias físicas secundarias': 'CANT_FUSION'
-})
+        'Artículo': 'SKU',
+        'Lote': 'LOTE',
+        'Subinventario': 'STATUS',
+        'Existencias físicas secundarias': 'CANT_FUSION'
+    })
 
-# 3. LIMPIEZA DE INFOLOG (Archivo: m90_...)
-# Nombres exactos de tus columnas: CODPRO, CODLOT, MOTIMM, CAJAS
+    # 3. LIMPIEZA DE INFOLOG
     df_info = df_info.rename(columns={
-    'CODPRO': 'SKU',
-    'CODLOT': 'LOTE',
-    'MOTIMM': 'STATUS',
-    'CAJAS': 'CANT_INFOLOG'
-})
+        'CODPRO': 'SKU',
+        'CODLOT': 'LOTE',
+        'MOTIMM': 'STATUS',
+        'CAJAS': 'CANT_INFOLOG'
+    })
 
-# 4. NORMALIZACIÓN CRÍTICA
-# Esto quita espacios invisibles que hacen que "80820752 " no sea igual a "80820752"
+    # 4. NORMALIZACIÓN (Aquí es donde estaba el error de espacios)
     for df in [df_fusion, df_info]:
-    df['SKU'] = df['SKU'].astype(str).str.strip()
-    df['LOTE'] = df['LOTE'].astype(str).str.strip()
-    df['STATUS'] = df['STATUS'].astype(str).str.strip()
+        df['SKU'] = df['SKU'].astype(str).str.strip()
+        df['LOTE'] = df['LOTE'].astype(str).str.strip()
+        df['STATUS'] = df['STATUS'].astype(str).str.strip()
 
-# 5. AGRUPACIÓN (Para sumar cajas si un lote está en dos pallets distintos)
+    # 5. AGRUPACIÓN
     fusion_agg = df_fusion.groupby(['SKU', 'LOTE', 'STATUS'])['CANT_FUSION'].sum().reset_index()
     info_agg = df_info.groupby(['SKU', 'LOTE', 'STATUS'])['CANT_INFOLOG'].sum().reset_index()
 
-# 6. UNIÓN DE TABLAS
+    # 6. UNIÓN Y CÁLCULOS
     comparativa = pd.merge(fusion_agg, info_agg, on=['SKU', 'LOTE', 'STATUS'], how='outer').fillna(0)
     comparativa['Diferencia'] = comparativa['CANT_FUSION'] - comparativa['CANT_INFOLOG']
     
-    # Clasificación de errores
     def clasificar(row):
         if row['Diferencia'] == 0: return "OK"
         if row['CANT_FUSION'] > 0 and row['CANT_INFOLOG'] == 0: return "Falta en Infolog"

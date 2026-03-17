@@ -42,7 +42,12 @@ mapeo_estatus = {
     'DAN': 'Deposito',
     'VAC': 'Deposito',
     'nan': 'Deposito',
-    '': 'Deposito'
+    '': 'Deposito',
+    'IVT': 'Deposito',
+    'VEN': 'Deposito',
+    'VIC': 'Deposito',
+    'REM': 'Deposito',
+
 }
 
 comparativa = None
@@ -153,6 +158,23 @@ if comparativa is not None:
         st.dataframe(solo_errores, use_container_width=True)
 
     with tab2:
-        st.subheader("Control de Mapeo")
-        st.write("Muestra cómo se están agrupando los estatus actualmente.")
-        st.dataframe(comparativa[['STATUS']].drop_duplicates())
+        st.subheader("🔍 Control de Mapeo de Estatus")
+        st.write("Usa esta tabla para verificar si los códigos de Infolog se están traduciendo correctamente.")
+        
+        # Creamos una tabla comparativa de los estatus de Infolog
+        if 'STATUS_ORIGINAL' in df_info.columns:
+            # Quitamos duplicados para ver solo las combinaciones únicas
+            chequeo_mapeo = df_info[['STATUS_ORIGINAL', 'STATUS']].drop_duplicates().sort_values('STATUS_ORIGINAL')
+            
+            # Renombramos para que sea más claro en pantalla
+            chequeo_mapeo.columns = ['Código en Infolog (Original)', 'Se muestra en Dashboard como:']
+            
+            st.dataframe(chequeo_mapeo, use_container_width=True, hide_index=True)
+            
+            st.info("""
+            **Tip para validación:**
+            Si ves que un código en la columna izquierda no tiene su equivalente correcto a la derecha, 
+            debes agregarlo a la lista `mapeo_estatus` en tu código de GitHub.
+            """)
+        else:
+            st.warning("No se pudo cargar la comparativa. Asegúrate de haber subido el archivo de Infolog.")

@@ -15,7 +15,7 @@ file_infolog = st.sidebar.file_uploader("2. Subir Reporte m90 (Infolog)", type=[
 # --- ESPACIO PARA TUS EQUIVALENCIAS ---
 # Instrucciones: 'Valor en Infolog': 'Valor en Fusion'
 mapeo_estatus = {
-    None: 'Deposito',
+    ' ': 'Deposito',
     'REQ': 'RevisionDA',
     'CA2': 'Canal 2',
     'CUA': 'Quarent_DA',

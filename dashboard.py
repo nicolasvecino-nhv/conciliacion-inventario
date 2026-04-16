@@ -47,6 +47,7 @@ mapeo_estatus = {
     'VEN': 'Deposito',
     'VIC': 'Deposito',
     'REM': 'Deposito',
+    'MUE': 'MuestrasDA',
 
 }
 
@@ -117,7 +118,8 @@ else:
     if comparativa is not None:
         st.sidebar.info("ℹ️ Mostrando última consulta guardada.")
     else:
-        st.info("👋 Bienvenido. Por favor, sube los archivos en la barra lateral para comenzar.")
+        st.info("👋 Bienvenido. Por favor, sube los archivos en la barra lateral para comenzar."
+        "Desarr")
 
 # --- VISUALIZACIÓN DE RESULTADOS ---
 if comparativa is not None:

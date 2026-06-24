@@ -23,6 +23,13 @@ st.sidebar.header("Carga de Datos")
 file_fusion = st.sidebar.file_uploader("1. Subir Detalle de Inventario Fatima (Fusion)", type=['xlsx', 'csv'])
 file_infolog = st.sidebar.file_uploader("2. Subir Reporte m90 (Infolog)", type=['xlsx', 'csv'])
 
+# Revisar error de lectura
+try:
+    df_info = pd.read_excel(file_infolog)
+    st.write("Columnas detectadas en Infolog:", list(df_info.columns)) # <-- LÍNEA TEMP PARA CORROBORAR
+except:
+    ...
+
 # --- EQUIVALENCIAS DE ESTATUS ---
 mapeo_estatus = {
     'REQ': 'RevisionDA',

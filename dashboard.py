@@ -10,7 +10,6 @@ st.title("📊 SnapShot Fusion Infolog")
 st.markdown("Comparación entre **Fusion** e **Infolog** para **NEWPGA**")
 
 # --- FUNCIONES DE MEMORIA (OPCIÓN 2) ---
-# Guardamos los resultados en un archivo tipo 'pickle' que Python lee muy rápido
 def guardar_en_memoria(df):
     df.to_pickle("ultima_comparativa.pkl")
 
@@ -19,12 +18,12 @@ def cargar_de_memoria():
         return pd.read_pickle("ultima_comparativa.pkl")
     return None
 
-# --- CARGA DE ARCHIVOS ---
+# --- CARGA DE DATOS ---
 st.sidebar.header("Carga de Datos")
 file_fusion = st.sidebar.file_uploader("1. Subir Detalle de Inventario Fatima (Fusion)", type=['xlsx', 'csv'])
 file_infolog = st.sidebar.file_uploader("2. Subir Reporte m90 (Infolog)", type=['xlsx', 'csv'])
 
-# --- ESPACIO PARA TUS EQUIVALENCIAS ---
+# --- EQUIVALENCIAS DE ESTATUS ---
 mapeo_estatus = {
     'REQ': 'RevisionDA',
     'CA2': 'Canal 2',
@@ -48,7 +47,6 @@ mapeo_estatus = {
     'VIC': 'Deposito',
     'REM': 'Deposito',
     'MUE': 'MuestrasDA',
-
 }
 
 comparativa = None
@@ -74,17 +72,46 @@ if file_fusion and file_infolog:
         'Existencias físicas secundarias': 'CANT_FUSION'
     })
 
-    # 3. LIMPIEZA DE INFOLOG Y TRADUCCIÓN
-    df_info = df_info.rename(columns={
+    # 3. IDENTIFICAR COLUMNA DE POSICIÓN EN INFOLOG (Nombre complejo de fórmula SQL)
+    nombre_col_larga = "TRIM(GEPAL.ZONSTS||'-'|| RIGHT('000'||GEPAL.ALLSTS, 3) ||'-'|| RIGHT('0000'||GEPAL.DPLSTS, 4) ||'-'|| RIGHT('00'||GEPAL.NIVSTS, 2))"
+    
+    col_posicion_real = None
+    for col in df_info.columns:
+        if "GEPAL.ZONSTS" in str(col) or str(col).strip() == nombre_col_larga:
+            col_posicion_real = col
+            break
+            
+    # Respaldo: si no coincide el nombre exacto, usamos la columna I (índice 8)
+    if col_posicion_real is None and len(df_info.columns) >= 9:
+        col_posicion_real = df_info.columns[8]
+
+    # Renombramos las columnas de Infolog
+    dicc_rename_info = {
         'CODPRO': 'SKU',
         'CODLOT': 'LOTE',
         'MOTIMM': 'STATUS_ORIGINAL',
         'CAJAS': 'CANT_INFOLOG'
-    })
+    }
+    if col_posicion_real:
+        dicc_rename_info[col_posicion_real] = 'POSICION'
+
+    df_info = df_info.rename(columns=dicc_rename_info)
 
     # Forzar vacíos a 'Deposito' antes del mapeo
     df_info['STATUS_ORIGINAL'] = df_info['STATUS_ORIGINAL'].astype(str).str.strip().replace(['nan', 'None', ''], 'Deposito')
     df_info['STATUS'] = df_info['STATUS_ORIGINAL'].map(mapeo_estatus).fillna(df_info['STATUS_ORIGINAL'])
+    
+    # Asegurar formato de texto en la posición para el filtro
+    if 'POSICION' in df_info.columns:
+        df_info['POSICION'] = df_info['POSICION'].astype(str).str.strip()
+    else:
+        df_info['POSICION'] = ""
+
+    # MEJORA 1: Cálculo de Pallets Perdidos (Estatus VAC o posición comienza con A-998)
+    condicion_perdidos = (df_info['STATUS_ORIGINAL'] == 'VAC') | (df_info['POSICION'].str.startswith('A-998', na=False))
+    df_perdidos = df_info[condicion_perdidos]
+    total_perdidos = df_perdidos['CANT_INFOLOG'].sum()
+    st.session_state['total_perdidos'] = total_perdidos
 
     # 4. NORMALIZACIÓN CRÍTICA
     for df in [df_fusion, df_info]:
@@ -117,21 +144,30 @@ else:
     comparativa = cargar_de_memoria()
     if comparativa is not None:
         st.sidebar.info("ℹ️ Mostrando última consulta guardada.")
+        if 'total_perdidos' not in st.session_state:
+            st.session_state['total_perdidos'] = 0
     else:
-        st.info("👋 Bienvenido. Por favor, sube los archivos en la barra lateral para comenzar."
-        "Desarr")
+        st.info("👋 Bienvenido. Por favor, sube los archivos en la barra lateral para comenzar.")
 
 # --- VISUALIZACIÓN DE RESULTADOS ---
 if comparativa is not None:
-    # MÉTRICAS
-    col1, col2, col3, col4 = st.columns(4)
+    # MÉTRICAS (Dividido en 5 columnas)
+    col1, col2, col3, col4, col5 = st.columns(5)
     total_lineas = len(comparativa)
     iguales = len(comparativa[comparativa['Diferencia'] == 0])
     
+    cant_perdidos = st.session_state.get('total_perdidos', 0)
+
     col1.metric("Conciliación (%)", f"{(iguales/total_lineas)*100:.2f}%")
     col2.metric("Total Fusion", f"{comparativa['CANT_FUSION'].sum():,.0f}")
     col3.metric("Total Infolog", f"{comparativa['CANT_INFOLOG'].sum():,.0f}")
     col4.metric("Dif. Neta", f"{comparativa['Diferencia'].sum():,.0f}")
+    col5.metric(
+        label="📦 Pallets Perdidos", 
+        value=f"{cant_perdidos:,.0f}", 
+        delta="- Alerta" if cant_perdidos > 0 else "Limpio", 
+        delta_color="inverse"
+    )
 
     tab1, tab2 = st.tabs(["📊 Análisis General", "🔍 Verificador de Estatus"])
 
@@ -157,22 +193,30 @@ if comparativa is not None:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
         
-        st.dataframe(solo_errores, use_container_width=True)
+        # MEJORA 2: Formato visual y color para diferencias negativas
+        def color_negativo_rojo(val):
+            if isinstance(val, (int, float)) and val < 0:
+                return 'color: #d62728; font-weight: bold;'
+            return ''
+
+        df_con_estilo = solo_errores.style.format({
+            'CANT_FUSION': '{:,.0f}',
+            'CANT_INFOLOG': '{:,.0f}',
+            'Diferencia': '{:,.0f}'
+        }).map(color_negativo_rojo, subset=['Diferencia'])
+        
+        st.dataframe(df_con_estilo, use_container_width=True)
 
     with tab2:
         st.subheader("🔍 Control de Mapeo de Estatus")
         st.write("Usa esta tabla para verificar cómo se agruparon los estatus.")
         
-        # Intentamos obtener la info de los archivos recién subidos
-        # Si no existen (porque cargamos de memoria), usamos la tabla comparativa
         try:
             if 'df_info' in locals():
-                # Si acabamos de subir los archivos
                 chequeo_mapeo = df_info[['STATUS_ORIGINAL', 'STATUS']].drop_duplicates().sort_values('STATUS_ORIGINAL')
                 chequeo_mapeo.columns = ['Código en Infolog (Original)', 'Se muestra en Dashboard como:']
                 st.dataframe(chequeo_mapeo, use_container_width=True, hide_index=True)
             else:
-                # Si estamos viendo datos viejos guardados en memoria
                 st.info("Mostrando estatus unificados de la última carga guardada:")
                 resumen_status = comparativa[['STATUS']].drop_duplicates().sort_values('STATUS')
                 st.dataframe(resumen_status, use_container_width=True, hide_index=True)

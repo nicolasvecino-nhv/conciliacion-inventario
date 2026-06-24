@@ -9,7 +9,7 @@ st.set_page_config(layout="wide", page_title="Conciliación Fusion vs Infolog")
 st.title("📊 SnapShot Fusion Infolog")
 st.markdown("Comparación entre **Fusion** e **Infolog** para **NEWPGA**")
 
-# --- FUNCIONES DE MEMORIA (OPCIÓN 2) ---
+# --- FUNCIONES DE MEMORIA ---
 def guardar_en_memoria(df):
     df.to_pickle("ultima_comparativa.pkl")
 
@@ -22,13 +22,6 @@ def cargar_de_memoria():
 st.sidebar.header("Carga de Datos")
 file_fusion = st.sidebar.file_uploader("1. Subir Detalle de Inventario Fatima (Fusion)", type=['xlsx', 'csv'])
 file_infolog = st.sidebar.file_uploader("2. Subir Reporte m90 (Infolog)", type=['xlsx', 'csv'])
-
-# Revisar error de lectura
-try:
-    df_info = pd.read_excel(file_infolog)
-    st.write("Columnas detectadas en Infolog:", list(df_info.columns)) # <-- LÍNEA TEMP PARA CORROBORAR
-except:
-    ...
 
 # --- EQUIVALENCIAS DE ESTATUS ---
 mapeo_estatus = {
@@ -79,7 +72,7 @@ if file_fusion and file_infolog:
         'Existencias físicas secundarias': 'CANT_FUSION'
     })
 
-    # 3. IDENTIFICAR COLUMNA DE POSICIÓN EN INFOLOG (Nombre complejo de fórmula SQL)
+    # 3. IDENTIFICAR COLUMNA DE POSICIÓN EN INFOLOG
     nombre_col_larga = "TRIM(GEPAL.ZONSTS||'-'|| RIGHT('000'||GEPAL.ALLSTS, 3) ||'-'|| RIGHT('0000'||GEPAL.DPLSTS, 4) ||'-'|| RIGHT('00'||GEPAL.NIVSTS, 2))"
     
     col_posicion_real = None
@@ -88,7 +81,6 @@ if file_fusion and file_infolog:
             col_posicion_real = col
             break
             
-    # Respaldo: si no coincide el nombre exacto, usamos la columna I (índice 8)
     if col_posicion_real is None and len(df_info.columns) >= 9:
         col_posicion_real = df_info.columns[8]
 
@@ -108,17 +100,26 @@ if file_fusion and file_infolog:
     df_info['STATUS_ORIGINAL'] = df_info['STATUS_ORIGINAL'].astype(str).str.strip().replace(['nan', 'None', ''], 'Deposito')
     df_info['STATUS'] = df_info['STATUS_ORIGINAL'].map(mapeo_estatus).fillna(df_info['STATUS_ORIGINAL'])
     
-    # Asegurar formato de texto en la posición para el filtro
     if 'POSICION' in df_info.columns:
         df_info['POSICION'] = df_info['POSICION'].astype(str).str.strip()
     else:
         df_info['POSICION'] = ""
 
-    # MEJORA 1: Cálculo de Pallets Perdidos (Estatus VAC o posición comienza con A-998)
+    # CAMBIO 1: Lógica de Pallets Perdidos (Detalle completo para reporte)
     condicion_perdidos = (df_info['STATUS_ORIGINAL'] == 'VAC') | (df_info['POSICION'].str.startswith('A-998', na=False))
-    df_perdidos = df_info[condicion_perdidos]
-    total_perdidos = df_perdidos['CANT_INFOLOG'].sum()
-    st.session_state['total_perdidos'] = total_perdidos
+    df_perdidos_raw = df_info[condicion_perdidos].copy()
+    
+    # Guardamos los datos clave de los perdidos
+    total_cajas_perdidas = df_perdidos_raw['CANT_INFOLOG'].sum()
+    total_pallets_perdidos = len(df_perdidos_raw)
+    
+    st.session_state['total_cajas_perdidas'] = total_cajas_perdidas
+    st.session_state['total_pallets_perdidos'] = total_pallets_perdidos
+    
+    # Guardamos el dataframe limpio de pérdidas para el reporte (Punto 2)
+    df_reporte_perdidos = df_perdidos_raw[['SKU', 'LOTE', 'STATUS_ORIGINAL', 'POSICION', 'CANT_INFOLOG']].copy()
+    df_reporte_perdidos = df_reporte_perdidos.rename(columns={'STATUS_ORIGINAL': 'ESTATUS ORIGINAL', 'CANT_INFOLOG': 'CAJAS'})
+    st.session_state['df_reporte_perdidos'] = df_reporte_perdidos
 
     # 4. NORMALIZACIÓN CRÍTICA
     for df in [df_fusion, df_info]:
@@ -151,32 +152,38 @@ else:
     comparativa = cargar_de_memoria()
     if comparativa is not None:
         st.sidebar.info("ℹ️ Mostrando última consulta guardada.")
-        if 'total_perdidos' not in st.session_state:
-            st.session_state['total_perdidos'] = 0
+        if 'total_cajas_perdidas' not in st.session_state:
+            st.session_state['total_cajas_perdidas'] = 0
+            st.session_state['total_pallets_perdidos'] = 0
+            st.session_state['df_reporte_perdidos'] = pd.DataFrame()
     else:
         st.info("👋 Bienvenido. Por favor, sube los archivos en la barra lateral para comenzar.")
 
 # --- VISUALIZACIÓN DE RESULTADOS ---
 if comparativa is not None:
-    # MÉTRICAS (Dividido en 5 columnas)
+    # MÉTRICAS
     col1, col2, col3, col4, col5 = st.columns(5)
     total_lineas = len(comparativa)
     iguales = len(comparativa[comparativa['Diferencia'] == 0])
     
-    cant_perdidos = st.session_state.get('total_perdidos', 0)
+    cajas_p = st.session_state.get('total_cajas_perdidas', 0)
+    pallets_p = st.session_state.get('total_pallets_perdidos', 0)
 
     col1.metric("Conciliación (%)", f"{(iguales/total_lineas)*100:.2f}%")
     col2.metric("Total Fusion", f"{comparativa['CANT_FUSION'].sum():,.0f}")
     col3.metric("Total Infolog", f"{comparativa['CANT_INFOLOG'].sum():,.0f}")
     col4.metric("Dif. Neta", f"{comparativa['Diferencia'].sum():,.0f}")
+    
+    # CAMBIO 1: Formato "Cajas / Pallets" en el KPI principal
     col5.metric(
-        label="📦 Pallets Perdidos", 
-        value=f"{cant_perdidos:,.0f}", 
-        delta="- Alerta" if cant_perdidos > 0 else "Limpio", 
+        label="📦 Pallets Perdidos (Cajas / Plts)", 
+        value=f"{cajas_p:,.0f} / {pallets_p}", 
+        delta="- Alerta" if pallets_p > 0 else "Limpio", 
         delta_color="inverse"
     )
 
-    tab1, tab2 = st.tabs(["📊 Análisis General", "🔍 Verificador de Estatus"])
+    # CAMBIO 2: Añadimos una tercera pestaña para el Reporte de Pérdidas
+    tab1, tab2, tab3 = st.tabs(["📊 Análisis General", "🔍 Verificador de Estatus", "🚨 Detalle Pallets Perdidos"])
 
     with tab1:
         st.subheader("Distribución de Diferencias")
@@ -187,7 +194,6 @@ if comparativa is not None:
         st.subheader("Detalle de Diferencias (Solo errores)")
         solo_errores = comparativa[comparativa['Diferencia'] != 0].sort_values(by='Diferencia', ascending=False)
         
-        # --- FUNCIÓN PARA DESCARGAR EXCEL ---
         output = BytesIO()
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
             solo_errores.to_excel(writer, index=False, sheet_name='Errores_Inventario')
@@ -200,7 +206,6 @@ if comparativa is not None:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
         
-        # MEJORA 2: Formato visual y color para diferencias negativas
         def color_negativo_rojo(val):
             if isinstance(val, (int, float)) and val < 0:
                 return 'color: #d62728; font-weight: bold;'
@@ -230,8 +235,33 @@ if comparativa is not None:
         except Exception as e:
             st.warning("No se puede mostrar el detalle del mapeo en este momento.")
 
+    # CAMBIO 2: Nueva pestaña interactiva con el detalle y descarga de pérdidas
+    with tab3:
+        st.subheader("🚨 Detalle de Pallets Perdidos en Infolog")
+        st.write("Registros que cumplen con estatus **VAC** o ubicaciones que inician con **A-998**.")
+        
+        df_p_mostrar = st.session_state.get('df_reporte_perdidos', pd.DataFrame())
+        
+        if not df_p_mostrar.empty:
+            # Botón de descarga para este reporte específico
+            output_p = BytesIO()
+            with pd.ExcelWriter(output_p, engine='xlsxwriter') as writer:
+                df_p_mostrar.to_excel(writer, index=False, sheet_name='Pallets_Perdidos')
+            processed_data_p = output_p.getvalue()
+
+            st.download_button(
+                label="📥 Descargar Reporte de Pérdidas en Excel (.xlsx)",
+                data=processed_data_p,
+                file_name="reporte_pallets_perdidos.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+            
+            # Aplicar formato de miles a la columna Cajas del reporte
+            df_p_estilo = df_p_mostrar.style.format({'CAJAS': '{:,.0f}'})
+            st.dataframe(df_p_estilo, use_container_width=True, hide_index=True)
+        else:
+            st.success("🎉 ¡Excelente! No se registran pallets perdidos en la consulta actual.")
+
         st.info("""
-        **Tip para validación:**
-        Si ves que un código no tiene su equivalente correcto, debes agregarlo a la lista `mapeo_estatus` 
-        en tu código de GitHub y volver a subir los archivos.
+        **Nota Operativa:** Recuerda que los registros aquí mostrados representan posiciones físicas en el m90 de Infolog que requieren regularización o auditoría en pasillo.
         """)

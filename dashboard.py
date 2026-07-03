@@ -83,7 +83,7 @@ if file_fusion and file_infolog:
     df_fusion['LOTE'] = df_fusion['LOTE'].astype(str).str.strip()
     df_fusion['FECHA_VENC_FUSION'] = pd.to_datetime(df_fusion['FECHA_VENC_FUSION'], errors='coerce')
 
-    # 🆕 MAESTRO INDEPENDIENTE DE FECHAS DE FUSION (Por SKU y Lote, ignorando el Estatus)
+    # MAESTRO INDEPENDIENTE DE FECHAS DE FUSION (Por SKU y Lote, ignorando el Estatus)
     maestro_fechas_fusion = df_fusion.dropna(subset=['FECHA_VENC_FUSION']).groupby(['SKU', 'LOTE'])['FECHA_VENC_FUSION'].first().reset_index()
 
     # 3. IDENTIFICAR COLUMNA DE POSICIÓN EN INFOLOG Y FECHA VENCIMIENTO (COLUMNA W -> Índice 22)
@@ -151,7 +151,7 @@ if file_fusion and file_infolog:
     fusion_agg = df_fusion.groupby(['SKU', 'LOTE', 'STATUS'])['CANT_FUSION'].sum().reset_index()
     info_agg = df_info.groupby(['SKU', 'LOTE', 'STATUS']).agg({
         'CANT_INFOLOG': 'sum',
-        'FECHA_VENC_INFOLOG': 'first' # Mantenemos la de Infolog solo para el cruce de auditoría
+        'FECHA_VENC_INFOLOG': 'first'
     }).reset_index()
 
     # 6. UNIÓN Y CÁLCULOS
@@ -160,19 +160,16 @@ if file_fusion and file_infolog:
     comparativa['CANT_INFOLOG'] = comparativa['CANT_INFOLOG'].fillna(0)
     comparativa['Diferencia'] = comparativa['CANT_FUSION'] - comparativa['CANT_INFOLOG']
     
-    # 🆕 CRUCE MAESTRO: Traemos la fecha real de Fusion usando solo SKU y Lote (adiós vacíos incorrectos)
+    # CRUCE MAESTRO: Traemos la fecha real de Fusion usando solo SKU y Lote
     comparativa = pd.merge(comparativa, maestro_fechas_fusion, on=['SKU', 'LOTE'], how='left')
     
-    # Asignación final y cálculo de Caducidad basados en la fecha maestra recuperada
     comparativa['Vencimiento'] = comparativa['FECHA_VENC_FUSION']
     comparativa['Caducidad'] = comparativa['Vencimiento'] - pd.Timedelta(days=180)
     
-    # Función para evaluar la regla del Delta y priorizar vacíos de Infolog
     def evaluar_delta_fechas(row):
         f_fusion = row['FECHA_VENC_FUSION']
         f_info = row['FECHA_VENC_INFOLOG']
         
-        # Si Fusion tiene fecha pero Infolog NO -> Máxima Prioridad de Falla
         if pd.notna(f_fusion) and pd.isna(f_info):
             return "🚨 Infolog sin Fecha"
             
@@ -254,16 +251,17 @@ if comparativa is not None:
         columnas_reporte = ['SKU', 'LOTE', 'STATUS', 'CANT_FUSION', 'CANT_INFOLOG', 'Diferencia', 'Tipo Error', 'Vencimiento', 'Caducidad']
         df_errores_final = solo_errores[columnas_reporte]
 
+        # PROCESO DE DESCARGA CONFIGURADO COMO EXCEL ESTRICTO (.xlsx)
         output = BytesIO()
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
             df_errores_final.to_excel(writer, index=False, sheet_name='Errores_Inventario')
         processed_data = output.getvalue()
 
         st.download_button(
-            label="📥 Descargar Errores con Vencamientos Fusion (.xlsx)",
+            label="📥 Descargar Errores con Vencimientos Fusion (.xlsx)",
             data=processed_data,
             file_name="errores_y_vencimientos_fusion.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"  # MIME corregido para Excel
         )
         
         def color_negativo_rojo(val):
@@ -283,11 +281,9 @@ if comparativa is not None:
         st.subheader("🔍 Control Cruzado de Fechas (Prioridad: Infolog Vacío)")
         st.write("Se exponen primero los lotes con fecha faltante en Infolog y luego los desvíos operativos mayores a 30 días.")
         
-        # Filtramos anomalías (Vacíos en Infolog o Desvíos de días)
         df_anomalias_fecha = comparativa[comparativa['Estado Fecha'].isin(["🚨 Infolog sin Fecha", "Falla Vencimiento (Desvío)"])].copy()
         
         if not df_anomalias_fecha.empty:
-            # 🆕 ORDENAMIENTO DE PRIORIDAD: "🚨 Infolog sin Fecha" aparecerá arriba de todo
             df_anomalias_fecha['prioridad'] = df_anomalias_fecha['Estado Fecha'].apply(lambda x: 0 if "sin Fecha" in x else 1)
             df_anomalias_fecha = df_anomalias_fecha.sort_values(by='prioridad').drop(columns=['prioridad'])
             

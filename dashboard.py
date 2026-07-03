@@ -144,7 +144,7 @@ if file_fusion and file_infolog:
         df['LOTE'] = df['LOTE'].astype(str).str.strip()
         df['STATUS'] = df['STATUS'].astype(str).str.strip()
 
-    # 5. AGRUPACIÓN (Mantenemos la primera fecha encontrada por cada SKU/Lote/Estatus)
+    # 5. AGRUPACIÓN
     fusion_agg = df_fusion.groupby(['SKU', 'LOTE', 'STATUS']).agg({
         'CANT_FUSION': 'sum',
         'FECHA_VENC_FUSION': 'first'
@@ -155,25 +155,40 @@ if file_fusion and file_infolog:
         'FECHA_VENC_INFOLOG': 'first'
     }).reset_index()
 
-    # 6. UNIÓN Y CÁLCULOS (Evitamos fillna(0) en todo el df para cuidar las fechas)
+    # 6. UNIÓN Y CÁLCULOS
     comparativa = pd.merge(fusion_agg, info_agg, on=['SKU', 'LOTE', 'STATUS'], how='outer')
     comparativa['CANT_FUSION'] = comparativa['CANT_FUSION'].fillna(0)
     comparativa['CANT_INFOLOG'] = comparativa['CANT_INFOLOG'].fillna(0)
     comparativa['Diferencia'] = comparativa['CANT_FUSION'] - comparativa['CANT_INFOLOG']
     
-    # 🆕 LÓGICA DE CONTROL DE VENCIMIENTOS Y CADUCIDAD
-    # Combinamos fechas: prioriza Fusion, si no tiene usa Infolog
-    comparativa['Vencimiento'] = comparativa['FECHA_VENC_FUSION'].combine_first(comparativa['FECHA_VENC_INFOLOG'])
-    # Caducidad = Vencimiento - 180 días
+    # 🆕 MEJORA: PRIORIDAD DE FECHAS (FUSION) Y CÁLCULO DEL DELTA DE DÍAS
+    # Vencimiento y Caducidad toman 100% como base la fecha de Fusion
+    comparativa['Vencimiento'] = comparativa['FECHA_VENC_FUSION']
     comparativa['Caducidad'] = comparativa['Vencimiento'] - pd.Timedelta(days=180)
     
-    # Formatear fechas para visualización limpia en strings (Evita errores visuales con NaT)
-    comparativa['Vencimiento'] = comparativa['Vencimiento'].dt.strftime('%Y-%m-%d').fillna('-')
-    comparativa['Caducidad'] = comparativa['Caducidad'].dt.strftime('%Y-%m-%d').fillna('-')
-    
-    # Guardamos strings de fechas de origen para el verificador cruzado
+    # Función para evaluar la regla del Delta entre fechas (Fusion vs Infolog)
+    def evaluar_delta_fechas(row):
+        f_fusion = row['FECHA_VENC_FUSION']
+        f_info = row['FECHA_VENC_INFOLOG']
+        
+        if pd.isna(f_fusion) or pd.isna(f_info):
+            return "OK" # Si falta alguna de las dos, no hay cruce completo para marcar falla operativa
+            
+        # Diferencia en días (Infolog - Fusion)
+        delta_dias = (f_info - f_fusion).days
+        
+        # REGLA: Falla si Infolog es mayor (delta > 0) o si Infolog es menor por más de 30 días (delta < -30)
+        if delta_dias > 0 or delta_dias < -30:
+            return "Falla Vencimiento"
+        return "OK"
+
+    comparativa['Estado Fecha'] = comparativa.apply(evaluar_delta_fechas, axis=1)
+
+    # Convertimos a string para mostrar limpio en las tablas
     comparativa['Venc_Fusion_str'] = comparativa['FECHA_VENC_FUSION'].dt.strftime('%Y-%m-%d').fillna('-')
     comparativa['Venc_Infolog_str'] = comparativa['FECHA_VENC_INFOLOG'].dt.strftime('%Y-%m-%d').fillna('-')
+    comparativa['Vencimiento_str'] = comparativa['Vencimiento'].dt.strftime('%Y-%m-%d').fillna('-')
+    comparativa['Caducidad_str'] = comparativa['Caducidad'].dt.strftime('%Y-%m-%d').fillna('-')
 
     def clasificar(row):
         if row['Diferencia'] == 0: return "OK"
@@ -213,7 +228,6 @@ if comparativa is not None:
     col3.metric("Total Infolog", f"{comparativa['CANT_INFOLOG'].sum():,.0f}")
     col4.metric("Dif. Neta", f"{comparativa['Diferencia'].sum():,.0f}")
     
-    # MEJORA 1: Control dinámico de color en el Delta de Pallets Perdidos
     col5.metric(
         label="📦 Pallets Perdidos (Cajas / Plts)", 
         value=f"{cajas_p:,.0f} / {pallets_p}", 
@@ -221,7 +235,6 @@ if comparativa is not None:
         delta_color="inverse" if pallets_p > 0 else "normal"
     )
 
-    # PESTAÑAS (Modificamos los contenidos para integrar Vencimientos)
     tab1, tab2, tab3 = st.tabs(["📊 Análisis General y Diferencias", "🔍 Auditoría de Estatus y Fechas", "🚨 Detalle Pallets Perdidos"])
 
     with tab1:
@@ -230,23 +243,25 @@ if comparativa is not None:
                      color_discrete_map={'OK':'#2ca02c', 'Falta en Infolog':'#ff7f0e', 'Falta en Fusion':'#d62728', 'Diferencia de Cantidad':'#1f77b4'})
         st.plotly_chart(fig, use_container_width=True)
 
-        st.subheader("Detalle de Diferencias (Solo errores) con Vencimiento y Caducidad")
+        st.subheader("Detalle de Diferencias (Solo errores) con Vencimiento y Caducidad Base Fusion")
         solo_errores = comparativa[comparativa['Diferencia'] != 0].sort_values(by='Diferencia', ascending=False)
         
-        # Seleccionamos y ordenamos columnas requeridas para el reporte final
+        # Mapeamos las nuevas columnas formateadas basadas prioritariamente en Fusion
+        solo_errores['Vencimiento'] = solo_errores['Vencimiento_str']
+        solo_errores['Caducidad'] = solo_errores['Caducidad_str']
+
         columnas_reporte = ['SKU', 'LOTE', 'STATUS', 'CANT_FUSION', 'CANT_INFOLOG', 'Diferencia', 'Tipo Error', 'Vencimiento', 'Caducidad']
         df_errores_final = solo_errores[columnas_reporte]
 
-        # Descarga Excel del Reporte con Fechas
         output = BytesIO()
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
             df_errores_final.to_excel(writer, index=False, sheet_name='Errores_Inventario')
         processed_data = output.getvalue()
 
         st.download_button(
-            label="📥 Descargar Errores con Vencimientos (.xlsx)",
+            label="📥 Descargar Errores con Vencimientos Fusion (.xlsx)",
             data=processed_data,
-            file_name="errores_y_vencimientos_conciliacion.xlsx",
+            file_name="errores_y_vencimientos_fusion.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
         
@@ -264,28 +279,21 @@ if comparativa is not None:
         st.dataframe(df_con_estilo, use_container_width=True, hide_index=True)
 
     with tab2:
-        st.subheader("🔍 Control Cruzado de Fechas de Vencimiento (Fusion vs Infolog)")
-        st.write("Verificación de discrepancias de fechas cargadas en los dos sistemas para el mismo Lote.")
+        st.subheader("🔍 Control Cruzado de Fechas (Regla Delta Operativa)")
+        st.write("Muestra los lotes donde la fecha de Infolog **es mayor** a Fusion, o **menor por más de 30 días**.")
         
-        # Filtramos lotes donde ambas fechas existan pero sean distintas (Control de vencimiento cruzado)
-        discrepancia_fechas = comparativa[
-            (comparativa['Venc_Fusion_str'] != '-') & 
-            (comparativa['Venc_Infolog_str'] != '-') & 
-            (comparativa['Venc_Fusion_str'] != ... if 'Venc_Fusion_str' not in comparativa else comparativa['Venc_Fusion_str'] != comparativa['Venc_Infolog_str'])
-        ]
+        # Filtramos de acuerdo al nuevo Estado Fecha calculado
+        df_fallas_fecha = comparativa[comparativa['Estado Fecha'] == "Falla Vencimiento"].copy()
         
-        # Ajuste preciso de la condición de discrepancia
-        discrepancia_fechas = comparativa[
-            (comparativa['Venc_Fusion_str'] != '-') & 
-            (comparativa['Venc_Infolog_str'] != '-') & 
-            (comparativa['Venc_Fusion_str'] != comparativa['Venc_Infolog_str'])
-        ]
-
-        if not discrepancia_fechas.empty:
-            st.warning(f"⚠️ Se detectaron {len(discrepancia_fechas)} lotes con fechas de vencimiento diferentes entre Fusion e Infolog.")
-            st.dataframe(discrepancia_fechas[['SKU', 'LOTE', 'STATUS', 'Venc_Fusion_str', 'Venc_Infolog_str']], use_container_width=True, hide_index=True)
+        if not df_fallas_fecha.empty:
+            st.error(f"⚠️ Se detectaron {len(df_fallas_fecha)} registros con desviaciones críticas de vencimiento.")
+            
+            df_fallas_mostrar = df_fallas_fecha[['SKU', 'LOTE', 'STATUS', 'Venc_Fusion_str', 'Venc_Infolog_str', 'Estado Fecha']]
+            df_fallas_mostrar.columns = ['SKU', 'LOTE', 'ESTATUS', 'FECHA FUSION (Base)', 'FECHA INFOLOG', 'ESTADO CRUCE']
+            
+            st.dataframe(df_fallas_mostrar, use_container_width=True, hide_index=True)
         else:
-            st.success("🎉 ¡Excelente! No hay discrepancias de fechas de vencimiento entre ambos sistemas.")
+            st.success("🎉 ¡Excelente! Todos los vencimientos cumplen con el margen del Delta admitido.")
 
         st.subheader("Mapeo General de Estatus")
         try:

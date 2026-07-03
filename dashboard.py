@@ -64,15 +64,24 @@ if file_fusion and file_infolog:
     except:
         df_info = pd.read_csv(file_infolog, encoding='latin-1', sep=None, engine='python')
 
-    # 2. LIMPIEZA DE FUSION
+    # 2. LIMPIEZA DE FUSION Y CAPTURA DE FECHA VENCIMIENTO (COLUMNA F -> Índice 5)
+    if len(df_fusion.columns) >= 6:
+        col_venc_fusion = df_fusion.columns[5]
+        df_fusion = df_fusion.rename(columns={col_venc_fusion: 'FECHA_VENC_FUSION'})
+    else:
+        df_fusion['FECHA_VENC_FUSION'] = pd.NaT
+
     df_fusion = df_fusion.rename(columns={
         'Artículo': 'SKU',
         'Lote': 'LOTE',
         'Subinventario': 'STATUS',
         'Existencias físicas secundarias': 'CANT_FUSION'
     })
+    
+    # Convertir fecha Fusion a datetime
+    df_fusion['FECHA_VENC_FUSION'] = pd.to_datetime(df_fusion['FECHA_VENC_FUSION'], errors='coerce')
 
-    # 3. IDENTIFICAR COLUMNA DE POSICIÓN EN INFOLOG
+    # 3. IDENTIFICAR COLUMNA DE POSICIÓN EN INFOLOG Y FECHA VENCIMIENTO (COLUMNA W -> Índice 22)
     nombre_col_larga = "TRIM(GEPAL.ZONSTS||'-'|| RIGHT('000'||GEPAL.ALLSTS, 3) ||'-'|| RIGHT('0000'||GEPAL.DPLSTS, 4) ||'-'|| RIGHT('00'||GEPAL.NIVSTS, 2))"
     
     col_posicion_real = None
@@ -84,7 +93,14 @@ if file_fusion and file_infolog:
     if col_posicion_real is None and len(df_info.columns) >= 9:
         col_posicion_real = df_info.columns[8]
 
-    # Renombramos las columnas de Infolog
+    # Captura de columna W en Infolog
+    if len(df_info.columns) >= 23:
+        col_venc_info = df_info.columns[22]
+        df_info = df_info.rename(columns={col_venc_info: 'FECHA_VENC_INFOLOG'})
+    else:
+        df_info['FECHA_VENC_INFOLOG'] = pd.NaT
+
+    # Renombramos las columnas estándares de Infolog
     dicc_rename_info = {
         'CODPRO': 'SKU',
         'CODLOT': 'LOTE',
@@ -96,6 +112,9 @@ if file_fusion and file_infolog:
 
     df_info = df_info.rename(columns=dicc_rename_info)
 
+    # Convertir fecha Infolog a datetime
+    df_info['FECHA_VENC_INFOLOG'] = pd.to_datetime(df_info['FECHA_VENC_INFOLOG'], errors='coerce')
+
     # Forzar vacíos a 'Deposito' antes del mapeo
     df_info['STATUS_ORIGINAL'] = df_info['STATUS_ORIGINAL'].astype(str).str.strip().replace(['nan', 'None', ''], 'Deposito')
     df_info['STATUS'] = df_info['STATUS_ORIGINAL'].map(mapeo_estatus).fillna(df_info['STATUS_ORIGINAL'])
@@ -105,18 +124,16 @@ if file_fusion and file_infolog:
     else:
         df_info['POSICION'] = ""
 
-    # CAMBIO 1: Lógica de Pallets Perdidos (Detalle completo para reporte)
+    # Lógica de Pallets Perdidos
     condicion_perdidos = (df_info['STATUS_ORIGINAL'] == 'VAC') | (df_info['POSICION'].str.startswith('A-998', na=False))
     df_perdidos_raw = df_info[condicion_perdidos].copy()
     
-    # Guardamos los datos clave de los perdidos
     total_cajas_perdidas = df_perdidos_raw['CANT_INFOLOG'].sum()
     total_pallets_perdidos = len(df_perdidos_raw)
     
     st.session_state['total_cajas_perdidas'] = total_cajas_perdidas
     st.session_state['total_pallets_perdidos'] = total_pallets_perdidos
     
-    # Guardamos el dataframe limpio de pérdidas para el reporte (Punto 2)
     df_reporte_perdidos = df_perdidos_raw[['SKU', 'LOTE', 'STATUS_ORIGINAL', 'POSICION', 'CANT_INFOLOG']].copy()
     df_reporte_perdidos = df_reporte_perdidos.rename(columns={'STATUS_ORIGINAL': 'ESTATUS ORIGINAL', 'CANT_INFOLOG': 'CAJAS'})
     st.session_state['df_reporte_perdidos'] = df_reporte_perdidos
@@ -127,14 +144,37 @@ if file_fusion and file_infolog:
         df['LOTE'] = df['LOTE'].astype(str).str.strip()
         df['STATUS'] = df['STATUS'].astype(str).str.strip()
 
-    # 5. AGRUPACIÓN
-    fusion_agg = df_fusion.groupby(['SKU', 'LOTE', 'STATUS'])['CANT_FUSION'].sum().reset_index()
-    info_agg = df_info.groupby(['SKU', 'LOTE', 'STATUS'])['CANT_INFOLOG'].sum().reset_index()
+    # 5. AGRUPACIÓN (Mantenemos la primera fecha encontrada por cada SKU/Lote/Estatus)
+    fusion_agg = df_fusion.groupby(['SKU', 'LOTE', 'STATUS']).agg({
+        'CANT_FUSION': 'sum',
+        'FECHA_VENC_FUSION': 'first'
+    }).reset_index()
+    
+    info_agg = df_info.groupby(['SKU', 'LOTE', 'STATUS']).agg({
+        'CANT_INFOLOG': 'sum',
+        'FECHA_VENC_INFOLOG': 'first'
+    }).reset_index()
 
-    # 6. UNIÓN Y CÁLCULOS
-    comparativa = pd.merge(fusion_agg, info_agg, on=['SKU', 'LOTE', 'STATUS'], how='outer').fillna(0)
+    # 6. UNIÓN Y CÁLCULOS (Evitamos fillna(0) en todo el df para cuidar las fechas)
+    comparativa = pd.merge(fusion_agg, info_agg, on=['SKU', 'LOTE', 'STATUS'], how='outer')
+    comparativa['CANT_FUSION'] = comparativa['CANT_FUSION'].fillna(0)
+    comparativa['CANT_INFOLOG'] = comparativa['CANT_INFOLOG'].fillna(0)
     comparativa['Diferencia'] = comparativa['CANT_FUSION'] - comparativa['CANT_INFOLOG']
     
+    # 🆕 LÓGICA DE CONTROL DE VENCIMIENTOS Y CADUCIDAD
+    # Combinamos fechas: prioriza Fusion, si no tiene usa Infolog
+    comparativa['Vencimiento'] = comparativa['FECHA_VENC_FUSION'].combine_first(comparativa['FECHA_VENC_INFOLOG'])
+    # Caducidad = Vencimiento - 180 días
+    comparativa['Caducidad'] = comparativa['Vencimiento'] - pd.Timedelta(days=180)
+    
+    # Formatear fechas para visualización limpia en strings (Evita errores visuales con NaT)
+    comparativa['Vencimiento'] = comparativa['Vencimiento'].dt.strftime('%Y-%m-%d').fillna('-')
+    comparativa['Caducidad'] = comparativa['Caducidad'].dt.strftime('%Y-%m-%d').fillna('-')
+    
+    # Guardamos strings de fechas de origen para el verificador cruzado
+    comparativa['Venc_Fusion_str'] = comparativa['FECHA_VENC_FUSION'].dt.strftime('%Y-%m-%d').fillna('-')
+    comparativa['Venc_Infolog_str'] = comparativa['FECHA_VENC_INFOLOG'].dt.strftime('%Y-%m-%d').fillna('-')
+
     def clasificar(row):
         if row['Diferencia'] == 0: return "OK"
         if row['CANT_FUSION'] > 0 and row['CANT_INFOLOG'] == 0: return "Falta en Infolog"
@@ -148,7 +188,6 @@ if file_fusion and file_infolog:
     st.sidebar.success("✅ Datos procesados y guardados en memoria.")
 
 else:
-    # Si no hay archivos subidos, intentamos cargar lo último que se guardó
     comparativa = cargar_de_memoria()
     if comparativa is not None:
         st.sidebar.info("ℹ️ Mostrando última consulta guardada.")
@@ -174,16 +213,16 @@ if comparativa is not None:
     col3.metric("Total Infolog", f"{comparativa['CANT_INFOLOG'].sum():,.0f}")
     col4.metric("Dif. Neta", f"{comparativa['Diferencia'].sum():,.0f}")
     
-    # CAMBIO 1: Formato "Cajas / Pallets" en el KPI principal
+    # MEJORA 1: Control dinámico de color en el Delta de Pallets Perdidos
     col5.metric(
         label="📦 Pallets Perdidos (Cajas / Plts)", 
         value=f"{cajas_p:,.0f} / {pallets_p}", 
-        delta="- Alerta" if pallets_p > 0 else "Limpio", 
-        delta_color="inverse"
+        delta="Alerta" if pallets_p > 0 else "Limpio", 
+        delta_color="inverse" if pallets_p > 0 else "normal"
     )
 
-    # CAMBIO 2: Añadimos una tercera pestaña para el Reporte de Pérdidas
-    tab1, tab2, tab3 = st.tabs(["📊 Análisis General", "🔍 Verificador de Estatus", "🚨 Detalle Pallets Perdidos"])
+    # PESTAÑAS (Modificamos los contenidos para integrar Vencimientos)
+    tab1, tab2, tab3 = st.tabs(["📊 Análisis General y Diferencias", "🔍 Auditoría de Estatus y Fechas", "🚨 Detalle Pallets Perdidos"])
 
     with tab1:
         st.subheader("Distribución de Diferencias")
@@ -191,18 +230,23 @@ if comparativa is not None:
                      color_discrete_map={'OK':'#2ca02c', 'Falta en Infolog':'#ff7f0e', 'Falta en Fusion':'#d62728', 'Diferencia de Cantidad':'#1f77b4'})
         st.plotly_chart(fig, use_container_width=True)
 
-        st.subheader("Detalle de Diferencias (Solo errores)")
+        st.subheader("Detalle de Diferencias (Solo errores) con Vencimiento y Caducidad")
         solo_errores = comparativa[comparativa['Diferencia'] != 0].sort_values(by='Diferencia', ascending=False)
         
+        # Seleccionamos y ordenamos columnas requeridas para el reporte final
+        columnas_reporte = ['SKU', 'LOTE', 'STATUS', 'CANT_FUSION', 'CANT_INFOLOG', 'Diferencia', 'Tipo Error', 'Vencimiento', 'Caducidad']
+        df_errores_final = solo_errores[columnas_reporte]
+
+        # Descarga Excel del Reporte con Fechas
         output = BytesIO()
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            solo_errores.to_excel(writer, index=False, sheet_name='Errores_Inventario')
+            df_errores_final.to_excel(writer, index=False, sheet_name='Errores_Inventario')
         processed_data = output.getvalue()
 
         st.download_button(
-            label="📥 Descargar Errores en Excel (.xlsx)",
+            label="📥 Descargar Errores con Vencimientos (.xlsx)",
             data=processed_data,
-            file_name="errores_inventario_conciliacion.xlsx",
+            file_name="errores_y_vencimientos_conciliacion.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
         
@@ -211,31 +255,51 @@ if comparativa is not None:
                 return 'color: #d62728; font-weight: bold;'
             return ''
 
-        df_con_estilo = solo_errores.style.format({
+        df_con_estilo = df_errores_final.style.format({
             'CANT_FUSION': '{:,.0f}',
             'CANT_INFOLOG': '{:,.0f}',
             'Diferencia': '{:,.0f}'
         }).map(color_negativo_rojo, subset=['Diferencia'])
         
-        st.dataframe(df_con_estilo, use_container_width=True)
+        st.dataframe(df_con_estilo, use_container_width=True, hide_index=True)
 
     with tab2:
-        st.subheader("🔍 Control de Mapeo de Estatus")
-        st.write("Usa esta tabla para verificar cómo se agruparon los estatus.")
+        st.subheader("🔍 Control Cruzado de Fechas de Vencimiento (Fusion vs Infolog)")
+        st.write("Verificación de discrepancias de fechas cargadas en los dos sistemas para el mismo Lote.")
         
+        # Filtramos lotes donde ambas fechas existan pero sean distintas (Control de vencimiento cruzado)
+        discrepancia_fechas = comparativa[
+            (comparativa['Venc_Fusion_str'] != '-') & 
+            (comparativa['Venc_Infolog_str'] != '-') & 
+            (comparativa['Venc_Fusion_str'] != ... if 'Venc_Fusion_str' not in comparativa else comparativa['Venc_Fusion_str'] != comparativa['Venc_Infolog_str'])
+        ]
+        
+        # Ajuste preciso de la condición de discrepancia
+        discrepancia_fechas = comparativa[
+            (comparativa['Venc_Fusion_str'] != '-') & 
+            (comparativa['Venc_Infolog_str'] != '-') & 
+            (comparativa['Venc_Fusion_str'] != comparativa['Venc_Infolog_str'])
+        ]
+
+        if not discrepancia_fechas.empty:
+            st.warning(f"⚠️ Se detectaron {len(discrepancia_fechas)} lotes con fechas de vencimiento diferentes entre Fusion e Infolog.")
+            st.dataframe(discrepancia_fechas[['SKU', 'LOTE', 'STATUS', 'Venc_Fusion_str', 'Venc_Infolog_str']], use_container_width=True, hide_index=True)
+        else:
+            st.success("🎉 ¡Excelente! No hay discrepancias de fechas de vencimiento entre ambos sistemas.")
+
+        st.subheader("Mapeo General de Estatus")
         try:
             if 'df_info' in locals():
                 chequeo_mapeo = df_info[['STATUS_ORIGINAL', 'STATUS']].drop_duplicates().sort_values('STATUS_ORIGINAL')
                 chequeo_mapeo.columns = ['Código en Infolog (Original)', 'Se muestra en Dashboard como:']
                 st.dataframe(chequeo_mapeo, use_container_width=True, hide_index=True)
             else:
-                st.info("Mostrando estatus unificados de la última carga guardada:")
+                st.info("Mostrando estatus de la última carga guardada:")
                 resumen_status = comparativa[['STATUS']].drop_duplicates().sort_values('STATUS')
                 st.dataframe(resumen_status, use_container_width=True, hide_index=True)
         except Exception as e:
-            st.warning("No se puede mostrar el detalle del mapeo en este momento.")
+            st.warning("No se puede mostrar el detalle del mapeo.")
 
-    # CAMBIO 2: Nueva pestaña interactiva con el detalle y descarga de pérdidas
     with tab3:
         st.subheader("🚨 Detalle de Pallets Perdidos en Infolog")
         st.write("Registros que cumplen con estatus **VAC** o ubicaciones que inician con **A-998**.")
@@ -243,7 +307,6 @@ if comparativa is not None:
         df_p_mostrar = st.session_state.get('df_reporte_perdidos', pd.DataFrame())
         
         if not df_p_mostrar.empty:
-            # Botón de descarga para este reporte específico
             output_p = BytesIO()
             with pd.ExcelWriter(output_p, engine='xlsxwriter') as writer:
                 df_p_mostrar.to_excel(writer, index=False, sheet_name='Pallets_Perdidos')
@@ -256,12 +319,7 @@ if comparativa is not None:
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
             
-            # Aplicar formato de miles a la columna Cajas del reporte
             df_p_estilo = df_p_mostrar.style.format({'CAJAS': '{:,.0f}'})
             st.dataframe(df_p_estilo, use_container_width=True, hide_index=True)
         else:
             st.success("🎉 ¡Excelente! No se registran pallets perdidos en la consulta actual.")
-
-        st.info("""
-        **Nota Operativa:** Recuerda que los registros aquí mostrados representan posiciones físicas en el m90 de Infolog que requieren regularización o auditoría en pasillo.
-        """)

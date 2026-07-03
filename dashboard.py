@@ -78,8 +78,13 @@ if file_fusion and file_infolog:
         'Existencias físicas secundarias': 'CANT_FUSION'
     })
     
-    # Convertir fecha Fusion a datetime
+    # Normalización inicial de llaves
+    df_fusion['SKU'] = df_fusion['SKU'].astype(str).str.strip()
+    df_fusion['LOTE'] = df_fusion['LOTE'].astype(str).str.strip()
     df_fusion['FECHA_VENC_FUSION'] = pd.to_datetime(df_fusion['FECHA_VENC_FUSION'], errors='coerce')
+
+    # 🆕 MAESTRO INDEPENDIENTE DE FECHAS DE FUSION (Por SKU y Lote, ignorando el Estatus)
+    maestro_fechas_fusion = df_fusion.dropna(subset=['FECHA_VENC_FUSION']).groupby(['SKU', 'LOTE'])['FECHA_VENC_FUSION'].first().reset_index()
 
     # 3. IDENTIFICAR COLUMNA DE POSICIÓN EN INFOLOG Y FECHA VENCIMIENTO (COLUMNA W -> Índice 22)
     nombre_col_larga = "TRIM(GEPAL.ZONSTS||'-'|| RIGHT('000'||GEPAL.ALLSTS, 3) ||'-'|| RIGHT('0000'||GEPAL.DPLSTS, 4) ||'-'|| RIGHT('00'||GEPAL.NIVSTS, 2))"
@@ -111,8 +116,8 @@ if file_fusion and file_infolog:
         dicc_rename_info[col_posicion_real] = 'POSICION'
 
     df_info = df_info.rename(columns=dicc_rename_info)
-
-    # Convertir fecha Infolog a datetime
+    df_info['SKU'] = df_info['SKU'].astype(str).str.strip()
+    df_info['LOTE'] = df_info['LOTE'].astype(str).str.strip()
     df_info['FECHA_VENC_INFOLOG'] = pd.to_datetime(df_info['FECHA_VENC_INFOLOG'], errors='coerce')
 
     # Forzar vacíos a 'Deposito' antes del mapeo
@@ -138,21 +143,15 @@ if file_fusion and file_infolog:
     df_reporte_perdidos = df_reporte_perdidos.rename(columns={'STATUS_ORIGINAL': 'ESTATUS ORIGINAL', 'CANT_INFOLOG': 'CAJAS'})
     st.session_state['df_reporte_perdidos'] = df_reporte_perdidos
 
-    # 4. NORMALIZACIÓN CRÍTICA
-    for df in [df_fusion, df_info]:
-        df['SKU'] = df['SKU'].astype(str).str.strip()
-        df['LOTE'] = df['LOTE'].astype(str).str.strip()
-        df['STATUS'] = df['STATUS'].astype(str).str.strip()
+    # 4. NORMALIZACIÓN CRÍTICA RESTANTE
+    df_fusion['STATUS'] = df_fusion['STATUS'].astype(str).str.strip()
+    df_info['STATUS'] = df_info['STATUS'].astype(str).str.strip()
 
-    # 5. AGRUPACIÓN
-    fusion_agg = df_fusion.groupby(['SKU', 'LOTE', 'STATUS']).agg({
-        'CANT_FUSION': 'sum',
-        'FECHA_VENC_FUSION': 'first'
-    }).reset_index()
-    
+    # 5. AGRUPACIÓN VOLUMÉTRICA
+    fusion_agg = df_fusion.groupby(['SKU', 'LOTE', 'STATUS'])['CANT_FUSION'].sum().reset_index()
     info_agg = df_info.groupby(['SKU', 'LOTE', 'STATUS']).agg({
         'CANT_INFOLOG': 'sum',
-        'FECHA_VENC_INFOLOG': 'first'
+        'FECHA_VENC_INFOLOG': 'first' # Mantenemos la de Infolog solo para el cruce de auditoría
     }).reset_index()
 
     # 6. UNIÓN Y CÁLCULOS
@@ -161,30 +160,33 @@ if file_fusion and file_infolog:
     comparativa['CANT_INFOLOG'] = comparativa['CANT_INFOLOG'].fillna(0)
     comparativa['Diferencia'] = comparativa['CANT_FUSION'] - comparativa['CANT_INFOLOG']
     
-    # 🆕 MEJORA: PRIORIDAD DE FECHAS (FUSION) Y CÁLCULO DEL DELTA DE DÍAS
-    # Vencimiento y Caducidad toman 100% como base la fecha de Fusion
+    # 🆕 CRUCE MAESTRO: Traemos la fecha real de Fusion usando solo SKU y Lote (adiós vacíos incorrectos)
+    comparativa = pd.merge(comparativa, maestro_fechas_fusion, on=['SKU', 'LOTE'], how='left')
+    
+    # Asignación final y cálculo de Caducidad basados en la fecha maestra recuperada
     comparativa['Vencimiento'] = comparativa['FECHA_VENC_FUSION']
     comparativa['Caducidad'] = comparativa['Vencimiento'] - pd.Timedelta(days=180)
     
-    # Función para evaluar la regla del Delta entre fechas (Fusion vs Infolog)
+    # Función para evaluar la regla del Delta y priorizar vacíos de Infolog
     def evaluar_delta_fechas(row):
         f_fusion = row['FECHA_VENC_FUSION']
         f_info = row['FECHA_VENC_INFOLOG']
         
-        if pd.isna(f_fusion) or pd.isna(f_info):
-            return "OK" # Si falta alguna de las dos, no hay cruce completo para marcar falla operativa
+        # Si Fusion tiene fecha pero Infolog NO -> Máxima Prioridad de Falla
+        if pd.notna(f_fusion) and pd.isna(f_info):
+            return "🚨 Infolog sin Fecha"
             
-        # Diferencia en días (Infolog - Fusion)
+        if pd.isna(f_fusion) or pd.isna(f_info):
+            return "OK"
+            
         delta_dias = (f_info - f_fusion).days
-        
-        # REGLA: Falla si Infolog es mayor (delta > 0) o si Infolog es menor por más de 30 días (delta < -30)
         if delta_dias > 0 or delta_dias < -30:
-            return "Falla Vencimiento"
+            return "Falla Vencimiento (Desvío)"
         return "OK"
 
     comparativa['Estado Fecha'] = comparativa.apply(evaluar_delta_fechas, axis=1)
 
-    # Convertimos a string para mostrar limpio en las tablas
+    # Convertimos a strings limpios para presentación
     comparativa['Venc_Fusion_str'] = comparativa['FECHA_VENC_FUSION'].dt.strftime('%Y-%m-%d').fillna('-')
     comparativa['Venc_Infolog_str'] = comparativa['FECHA_VENC_INFOLOG'].dt.strftime('%Y-%m-%d').fillna('-')
     comparativa['Vencimiento_str'] = comparativa['Vencimiento'].dt.strftime('%Y-%m-%d').fillna('-')
@@ -243,10 +245,9 @@ if comparativa is not None:
                      color_discrete_map={'OK':'#2ca02c', 'Falta en Infolog':'#ff7f0e', 'Falta en Fusion':'#d62728', 'Diferencia de Cantidad':'#1f77b4'})
         st.plotly_chart(fig, use_container_width=True)
 
-        st.subheader("Detalle de Diferencias (Solo errores) con Vencimiento y Caducidad Base Fusion")
+        st.subheader("Detalle de Diferencias (Solo errores) con Vencimiento Seguro de Fusion")
         solo_errores = comparativa[comparativa['Diferencia'] != 0].sort_values(by='Diferencia', ascending=False)
         
-        # Mapeamos las nuevas columnas formateadas basadas prioritariamente en Fusion
         solo_errores['Vencimiento'] = solo_errores['Vencimiento_str']
         solo_errores['Caducidad'] = solo_errores['Caducidad_str']
 
@@ -259,7 +260,7 @@ if comparativa is not None:
         processed_data = output.getvalue()
 
         st.download_button(
-            label="📥 Descargar Errores con Vencimientos Fusion (.xlsx)",
+            label="📥 Descargar Errores con Vencamientos Fusion (.xlsx)",
             data=processed_data,
             file_name="errores_y_vencimientos_fusion.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -279,21 +280,25 @@ if comparativa is not None:
         st.dataframe(df_con_estilo, use_container_width=True, hide_index=True)
 
     with tab2:
-        st.subheader("🔍 Control Cruzado de Fechas (Regla Delta Operativa)")
-        st.write("Muestra los lotes donde la fecha de Infolog **es mayor** a Fusion, o **menor por más de 30 días**.")
+        st.subheader("🔍 Control Cruzado de Fechas (Prioridad: Infolog Vacío)")
+        st.write("Se exponen primero los lotes con fecha faltante en Infolog y luego los desvíos operativos mayores a 30 días.")
         
-        # Filtramos de acuerdo al nuevo Estado Fecha calculado
-        df_fallas_fecha = comparativa[comparativa['Estado Fecha'] == "Falla Vencimiento"].copy()
+        # Filtramos anomalías (Vacíos en Infolog o Desvíos de días)
+        df_anomalias_fecha = comparativa[comparativa['Estado Fecha'].isin(["🚨 Infolog sin Fecha", "Falla Vencimiento (Desvío)"])].copy()
         
-        if not df_fallas_fecha.empty:
-            st.error(f"⚠️ Se detectaron {len(df_fallas_fecha)} registros con desviaciones críticas de vencimiento.")
+        if not df_anomalias_fecha.empty:
+            # 🆕 ORDENAMIENTO DE PRIORIDAD: "🚨 Infolog sin Fecha" aparecerá arriba de todo
+            df_anomalias_fecha['prioridad'] = df_anomalias_fecha['Estado Fecha'].apply(lambda x: 0 if "sin Fecha" in x else 1)
+            df_anomalias_fecha = df_anomalias_fecha.sort_values(by='prioridad').drop(columns=['prioridad'])
             
-            df_fallas_mostrar = df_fallas_fecha[['SKU', 'LOTE', 'STATUS', 'Venc_Fusion_str', 'Venc_Infolog_str', 'Estado Fecha']]
-            df_fallas_mostrar.columns = ['SKU', 'LOTE', 'ESTATUS', 'FECHA FUSION (Base)', 'FECHA INFOLOG', 'ESTADO CRUCE']
+            st.error(f"⚠️ Se detectaron {len(df_anomalias_fecha)} registros con novedades o fallas de vencimiento.")
+            
+            df_fallas_mostrar = df_anomalias_fecha[['SKU', 'LOTE', 'STATUS', 'Venc_Fusion_str', 'Venc_Infolog_str', 'Estado Fecha']]
+            df_fallas_mostrar.columns = ['SKU', 'LOTE', 'ESTATUS', 'FECHA FUSION (Base)', 'FECHA INFOLOG', 'DIAGNÓSTICO CRUCE']
             
             st.dataframe(df_fallas_mostrar, use_container_width=True, hide_index=True)
         else:
-            st.success("🎉 ¡Excelente! Todos los vencimientos cumplen con el margen del Delta admitido.")
+            st.success("🎉 ¡Excelente! Todos los vencimientos están cargados en Infolog y cumplen con los deltas admitidos.")
 
         st.subheader("Mapeo General de Estatus")
         try:

@@ -68,6 +68,9 @@ mapeo_estatus = {
     'VIC': 'Deposito',
     'REM': 'Deposito',
     'MUE': 'MuestrasDA',
+    'DAN': 'Scrap',
+    'VAS': 'Deposito',
+
 }
 
 comparativa = None

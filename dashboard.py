@@ -1,377 +1,365 @@
 import streamlit as st
 import pandas as pd
-import plotly.express as px
-import os
-from io import BytesIO
+import requests
+import json
+import numpy as np
+from datetime import datetime, timedelta, timezone
 
-st.set_page_config(layout="wide", page_title="Conciliación Fusion vs Infolog")
+# =====================================================================
+# CONFIGURACIÓN DE CONEXIÓN
+# =====================================================================
+# ⚠️ PEGA AQUÍ TU URL REAL DE GOOGLE APPS SCRIPT:
+URL_GOOGLE_SCRIPT = "TU_NUEVA_URL_AQUI"
 
-st.title("📊 SnapShot Fusion Infolog")
-st.markdown("Comparación entre **Fusion** e **Infolog** para **NEWPGA**")
+st.set_page_config(layout="wide", page_title="Tracking de Pedidos", page_icon="📦")
 
-# --- FUNCIONES DE MEMORIA AMPLIADAS ---
-def guardar_en_memoria(df_comparativa, df_perdidos, df_fallas_fechas, total_cajas, total_pallets):
-    # Guardamos los 3 DataFrames en disco local
-    df_comparativa.to_pickle("ultima_comparativa.pkl")
-    df_perdidos.to_pickle("ultimo_reporte_perdidos.pkl")
-    df_fallas_fechas.to_pickle("ultimo_fallas_fechas.pkl")
+# =====================================================================
+# SISTEMA DE LOGIN Y PERFILES
+# =====================================================================
+if 'demoras_pendientes' not in st.session_state:
+    st.session_state.demoras_pendientes = {}
+
+if 'perfil' not in st.session_state:
+    st.session_state.perfil = None
+
+if st.session_state.perfil is None:
+    st.markdown("<h2 style='text-align: center;'>👋 Bienvenido al Sistema WMS</h2>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; margin-bottom: 30px;'>Por favor, selecciona tu perfil de ingreso:</p>", unsafe_allow_html=True)
     
-    # Guardamos los KPIs numéricos simples en un archivito de texto rápido
-    with open("ultimas_metricas.txt", "w") as f:
-        f.write(f"{total_cajas},{total_pallets}")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        if st.button("🧑‍🔧 Operación (Armado en Pista)", use_container_width=True):
+            st.session_state.perfil = "Operacion"
+            st.rerun()
+    with col2:
+        if st.button("👁️ Visualizador (Solo Monitor)", use_container_width=True):
+            st.session_state.perfil = "Visualizador"
+            st.rerun()
+    with col3:
+        if st.button("⚙️ Supervisor (Carga de Datos)", use_container_width=True):
+            st.session_state.perfil = "Supervisor"
+            st.rerun()
+    st.stop() 
 
-def cargar_de_memoria():
-    if (os.path.exists("ultima_comparativa.pkl") and 
-        os.path.exists("ultimo_reporte_perdidos.pkl") and 
-        os.path.exists("ultimo_fallas_fechas.pkl")):
-        
-        comparativa = pd.read_pickle("ultima_comparativa.pkl")
-        perdidos = pd.read_pickle("ultimo_reporte_perdidos.pkl")
-        fallas_fechas = pd.read_pickle("ultimo_fallas_fechas.pkl")
-        
-        total_cajas, total_pallets = 0, 0
-        if os.path.exists("ultimas_metricas.txt"):
-            with open("ultimas_metricas.txt", "r") as f:
-                datos = f.read().split(",")
-                total_cajas = int(float(datos[0]))
-                total_pallets = int(float(datos[1]))
-                
-        return comparativa, perdidos, fallas_fechas, total_cajas, total_pallets
-    return None
+st.sidebar.markdown(f"**🟢 Conectado como:**<br>{st.session_state.perfil}", unsafe_allow_html=True)
+if st.sidebar.button("Cerrar Sesión / Cambiar Rol"):
+    st.session_state.perfil = None
+    st.rerun()
 
-# --- CARGA DE DATOS ---
-st.sidebar.header("Carga de Datos")
-file_fusion = st.sidebar.file_uploader("1. Subir Detalle de Inventario Fatima (Fusion)", type=['xlsx', 'csv'])
-file_infolog = st.sidebar.file_uploader("2. Subir Reporte m90 (Infolog)", type=['xlsx', 'csv'])
+# =====================================================================
+# CSS PARA KPIs Y TARJETAS (ADAPTABLE A MODO CLARO/OSCURO)
+# =====================================================================
+st.markdown("""
+    <style>
+    /* Usamos variables nativas de Streamlit para que se adapte al tema del usuario */
+    .kpi-box { background-color: var(--secondary-background-color); color: var(--text-color); padding: 12px 5px; border-radius: 6px; border-top: 4px solid #E55B3C; text-align: center; box-shadow: 1px 1px 3px rgba(0,0,0,0.2);}
+    .kpi-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; opacity: 0.8;}
+    .kpi-value { font-size: 20px; font-weight: bold; margin-top: 4px;}
+    
+    .monitor-card { padding: 15px; border-radius: 10px; margin-bottom: 15px; color: white; font-family: sans-serif; box-shadow: 2px 2px 5px rgba(0,0,0,0.3); }
+    .card-red { background-color: #b71c1c; border-left: 8px solid #ff5252; }
+    .card-yellow { background-color: #f57f17; border-left: 8px solid #ffeb3b; }
+    .card-green { background-color: #2e7d32; border-left: 8px solid #69f0ae; }
+    .card-title { font-size: 22px; font-weight: bold; margin-bottom: 5px; border-bottom: 1px solid rgba(255,255,255,0.2); padding-bottom: 5px;}
+    .card-foco { font-size: 18px; font-weight: bold; margin-top: 10px; text-transform: uppercase; }
+    .card-text { font-size: 14px; margin: 2px 0; }
+    </style>
+""", unsafe_allow_html=True)
 
-# --- EQUIVALENCIAS DE ESTATUS ---
-mapeo_estatus = {
-    'REQ': 'RevisionDA',
-    'CA2': 'Canal 2',
-    'CUA': 'Quarent_DA',
-    'SCR': 'Scrap',
-    'REV': 'Revision',
-    'DON': 'Donaciones',
-    'DEV': 'Devolucion',
-    'BLO': 'Bloqueo_DA',
-    'SCQ': 'MuestrasDA',
-    'FLV': 'Deposito',
-    'LAO': 'Deposito',
-    'PAN': 'Deposito',
-    'DPG': 'Deposito',
-    'DAN': 'Deposito',
-    'VAC': 'Deposito',
-    'nan': 'Deposito',
-    '': 'Deposito',
-    'IVT': 'Deposito',
-    'VEN': 'Deposito',
-    'VIC': 'Deposito',
-    'REM': 'Deposito',
-    'MUE': 'MuestrasDA',
-    'DAN': 'Scrap',
-    'VAS': 'Deposito',
+st.title("📦 Tablero de Seguimiento y Preparado de Pedidos")
 
-}
+ESTADOS_LISTA = ["PENDIENTE", "CARENCIA", "LANZADA", "EN PREPARACIÓN", "PREPARADA", "EN CONTROL", "CONTROLADA", "CARGANDO", "TOP SALIDA", "DESPACHADA"]
+ESTADOS_PREPARADOS = ["PREPARADA", "EN CONTROL", "CONTROLADA", "CARGANDO", "TOP SALIDA"]
+ESTADO_PESO = {estado: i+1 for i, estado in enumerate(ESTADOS_LISTA)}
 
-comparativa = None
-df_reporte_perdidos = pd.DataFrame()
-df_fallas_fechas_pallet = pd.DataFrame()
-total_cajas_perdidas = 0
-total_pallets_perdidos = 0
-
-# Si el usuario sube AMBOS archivos, procesamos de nuevo
-if file_fusion and file_infolog:
-    # 1. Carga de datos
+def unificar_fechas(fecha_val):
     try:
-        df_fusion = pd.read_excel(file_fusion)
-    except:
-        df_fusion = pd.read_csv(file_fusion, encoding='latin-1', sep=None, engine='python')
-    
-    try:
-        df_info = pd.read_excel(file_infolog)
-    except:
-        df_info = pd.read_csv(file_infolog, encoding='latin-1', sep=None, engine='python')
-
-    # 2. LIMPIEZA DE FUSION Y CAPTURA DE FECHA VENCIMIENTO (COLUMNA F -> Índice 5)
-    if len(df_fusion.columns) >= 6:
-        col_venc_fusion = df_fusion.columns[5]
-        df_fusion = df_fusion.rename(columns={col_venc_fusion: 'FECHA_VENC_FUSION'})
-    else:
-        df_fusion['FECHA_VENC_FUSION'] = pd.NaT
-
-    df_fusion = df_fusion.rename(columns={
-        'Artículo': 'SKU',
-        'Lote': 'LOTE',
-        'Subinventario': 'STATUS',
-        'Existencias físicas secundarias': 'CANT_FUSION'
-    })
-    
-    # Normalización inicial de llaves
-    df_fusion['SKU'] = df_fusion['SKU'].astype(str).str.strip()
-    df_fusion['LOTE'] = df_fusion['LOTE'].astype(str).str.strip()
-    df_fusion['FECHA_VENC_FUSION'] = pd.to_datetime(df_fusion['FECHA_VENC_FUSION'], errors='coerce')
-
-    # MAESTRO INDEPENDIENTE DE FECHAS DE FUSION (Por SKU y Lote, ignorando el Estatus)
-    maestro_fechas_fusion = df_fusion.dropna(subset=['FECHA_VENC_FUSION']).groupby(['SKU', 'LOTE'])['FECHA_VENC_FUSION'].first().reset_index()
-
-    # 3. IDENTIFICAR POSICIÓN, PALLET (COLUMNA U -> Índice 20) Y FECHA EN INFOLOG (COLUMNA W -> Índice 22)
-    nombre_col_larga = "TRIM(GEPAL.ZONSTS||'-'|| RIGHT('000'||GEPAL.ALLSTS, 3) ||'-'|| RIGHT('0000'||GEPAL.DPLSTS, 4) ||'-'|| RIGHT('00'||GEPAL.NIVSTS, 2))"
-    
-    col_posicion_real = None
-    for col in df_info.columns:
-        if "GEPAL.ZONSTS" in str(col) or str(col).strip() == nombre_col_larga:
-            col_posicion_real = col
-            break
-            
-    if col_posicion_real is None and len(df_info.columns) >= 9:
-        col_posicion_real = df_info.columns[8]
-
-    # Captura de columna U (Pallet / CODPAL)
-    if len(df_info.columns) >= 21:
-        col_pallet_info = df_info.columns[20]
-        df_info = df_info.rename(columns={col_pallet_info: 'PALLET'})
-    else:
-        df_info['PALLET'] = ""
-
-    # Captura de columna W (Fecha Vencimiento)
-    if len(df_info.columns) >= 23:
-        col_venc_info = df_info.columns[22]
-        df_info = df_info.rename(columns={col_venc_info: 'FECHA_VENC_INFOLOG'})
-    else:
-        df_info['FECHA_VENC_INFOLOG'] = pd.NaT
-
-    # Renombramos las columnas estándares de Infolog
-    dicc_rename_info = {
-        'CODPRO': 'SKU',
-        'CODLOT': 'LOTE',
-        'MOTIMM': 'STATUS_ORIGINAL',
-        'CAJAS': 'CANT_INFOLOG'
-    }
-    if col_posicion_real:
-        dicc_rename_info[col_posicion_real] = 'POSICION'
-
-    df_info = df_info.rename(columns=dicc_rename_info)
-    df_info['SKU'] = df_info['SKU'].astype(str).str.strip()
-    df_info['LOTE'] = df_info['LOTE'].astype(str).str.strip()
-    df_info['PALLET'] = df_info['PALLET'].astype(str).str.strip().replace(['nan', 'None', ''], '-')
-    df_info['FECHA_VENC_INFOLOG'] = pd.to_datetime(df_info['FECHA_VENC_INFOLOG'], errors='coerce')
-
-    # Forzar vacíos a 'Deposito' antes del mapeo
-    df_info['STATUS_ORIGINAL'] = df_info['STATUS_ORIGINAL'].astype(str).str.strip().replace(['nan', 'None', ''], 'Deposito')
-    df_info['STATUS'] = df_info['STATUS_ORIGINAL'].map(mapeo_estatus).fillna(df_info['STATUS_ORIGINAL'])
-    
-    if 'POSICION' in df_info.columns:
-        df_info['POSICION'] = df_info['POSICION'].astype(str).str.strip()
-    else:
-        df_info['POSICION'] = ""
-
-    # Lógica de Pallets Perdidos
-    condicion_perdidos = (df_info['STATUS_ORIGINAL'] == 'VAC') | (df_info['POSICION'].str.startswith('A-998', na=False))
-    df_perdidos_raw = df_info[condicion_perdidos].copy()
-    
-    total_cajas_perdidas = df_perdidos_raw['CANT_INFOLOG'].sum()
-    total_pallets_perdidos = len(df_perdidos_raw)
-    
-    df_reporte_perdidos = df_perdidos_raw[['SKU', 'LOTE', 'STATUS_ORIGINAL', 'POSICION', 'CANT_INFOLOG']].copy()
-    df_reporte_perdidos = df_reporte_perdidos.rename(columns={'STATUS_ORIGINAL': 'ESTATUS ORIGINAL', 'CANT_INFOLOG': 'CAJAS'})
-
-    # 4. NORMALIZACIÓN CRÍTICA RESTANTE
-    df_fusion['STATUS'] = df_fusion['STATUS'].astype(str).str.strip()
-    df_info['STATUS'] = df_info['STATUS'].astype(str).str.strip()
-
-    # 5. AGRUPACIONES PARA EL CUADRO DE DIFERENCIAS
-    fusion_agg = df_fusion.groupby(['SKU', 'LOTE', 'STATUS'])['CANT_FUSION'].sum().reset_index()
-    info_agg_volumen = df_info.groupby(['SKU', 'LOTE', 'STATUS'])['CANT_INFOLOG'].sum().reset_index()
-
-    # 6. UNIÓN Y CÁLCULOS GENERALES
-    comparativa = pd.merge(fusion_agg, info_agg_volumen, on=['SKU', 'LOTE', 'STATUS'], how='outer')
-    comparativa['CANT_FUSION'] = comparativa['CANT_FUSION'].fillna(0)
-    comparativa['CANT_INFOLOG'] = comparativa['CANT_INFOLOG'].fillna(0)
-    comparativa['Diferencia'] = comparativa['CANT_FUSION'] - comparativa['CANT_INFOLOG']
-    
-    # Cruce maestro de fechas para la pestaña general
-    comparativa = pd.merge(comparativa, maestro_fechas_fusion, on=['SKU', 'LOTE'], how='left')
-    comparativa['Vencimiento'] = comparativa['FECHA_VENC_FUSION']
-    comparativa['Caducidad'] = comparativa['Vencimiento'] - pd.Timedelta(days=180)
-    
-    comparativa['Vencimiento_str'] = comparativa['Vencimiento'].dt.strftime('%Y-%m-%d').fillna('-')
-    comparativa['Caducidad_str'] = comparativa['Caducidad'].dt.strftime('%Y-%m-%d').fillna('-')
-
-    def clasificar(row):
-        if row['Diferencia'] == 0: return "OK"
-        if row['CANT_FUSION'] > 0 and row['CANT_INFOLOG'] == 0: return "Falta en Infolog"
-        if row['CANT_INFOLOG'] > 0 and row['CANT_FUSION'] == 0: return "Falta en Fusion"
-        return "Diferencia de Cantidad"
-
-    comparativa['Tipo Error'] = comparativa.apply(clasificar, axis=1)
-
-    # 7. ESTRUCTURACIÓN DE AUDITORÍA DETALLADA (UNA LÍNEA POR PALLET DE INFOLOG)
-    audit_pallets = df_info[['SKU', 'LOTE', 'STATUS', 'PALLET', 'FECHA_VENC_INFOLOG']].copy()
-    audit_pallets = pd.merge(audit_pallets, maestro_fechas_fusion, on=['SKU', 'LOTE'], how='left')
-
-    def evaluar_delta_fechas(row):
-        f_fusion = row['FECHA_VENC_FUSION']
-        f_info = row['FECHA_VENC_INFOLOG']
-        
-        if pd.notna(f_fusion) and pd.isna(f_info):
-            return "🚨 Infolog sin Fecha"
-            
-        if pd.isna(f_fusion) or pd.isna(f_info):
-            return "OK"
-            
-        delta_dias = (f_info - f_fusion).days
-        if delta_dias > 0 or delta_dias < -30:
-            return "Falla Vencimiento (Desvío)"
-        return "OK"
-
-    audit_pallets['Estado Fecha'] = audit_pallets.apply(evaluar_delta_fechas, axis=1)
-    
-    audit_pallets['Venc_Fusion_str'] = audit_pallets['FECHA_VENC_FUSION'].dt.strftime('%Y-%m-%d').fillna('-')
-    audit_pallets['Venc_Infolog_str'] = audit_pallets['FECHA_VENC_INFOLOG'].dt.strftime('%Y-%m-%d').fillna('-')
-
-    # Filtramos para el reporte únicamente los desvíos (Anomalías o Vacíos)
-    df_anomalias_fecha = audit_pallets[audit_pallets['Estado Fecha'].isin(["🚨 Infolog sin Fecha", "Falla Vencimiento (Desvío)"])].copy()
-    
-    # Ordenamos asignando máxima prioridad a las fechas vacías en Infolog
-    if not df_anomalias_fecha.empty:
-        df_anomalias_fecha['prioridad'] = df_anomalias_fecha['Estado Fecha'].apply(lambda x: 0 if "sin Fecha" in x else 1)
-        df_anomalias_fecha = df_anomalias_fecha.sort_values(by=['prioridad', 'SKU', 'LOTE']).drop(columns=['prioridad'])
-        
-        df_fallas_exportar = df_anomalias_fecha[['SKU', 'LOTE', 'STATUS', 'PALLET', 'Venc_Fusion_str', 'Venc_Infolog_str', 'Estado Fecha']].copy()
-        df_fallas_exportar.columns = ['SKU', 'LOTE', 'ESTATUS', 'NUMERO PALLET', 'FECHA FUSION (Base)', 'FECHA INFOLOG', 'DIAGNÓSTICO CRUCE']
-        df_fallas_fechas_pallet = df_fallas_exportar
-    else:
-        df_fallas_fechas_pallet = pd.DataFrame()
-
-    # GUARDAR TODO EN MEMORIA LOCAL PARA QUE SEA TRANSVERSAL A CUALQUIER TERMINAL
-    guardar_en_memoria(comparativa, df_reporte_perdidos, df_fallas_fechas_pallet, total_cajas_perdidas, total_pallets_perdidos)
-    st.sidebar.success("✅ Datos procesados y guardados de forma global.")
-
-else:
-    # Si no hay archivos subidos, cargamos lo último que se guardó globalmente en el disco del servidor
-    datos_memoria = cargar_de_memoria()
-    if datos_memoria is not None:
-        comparativa, df_reporte_perdidos, df_fallas_fechas_pallet, total_cajas_perdidas, total_pallets_perdidos = datos_memoria
-        st.sidebar.info("ℹ️ Mostrando última consulta guardada.")
-    else:
-        st.info("👋 Bienvenido. Por favor, sube los archivos en la barra lateral para comenzar.")
-
-# --- VISUALIZACIÓN DE RESULTADOS ---
-if comparativa is not None:
-    # MÉTRICAS
-    col1, col2, col3, col4, col5 = st.columns(5)
-    total_lineas = len(comparativa)
-    iguales = len(comparativa[comparativa['Diferencia'] == 0])
-
-    col1.metric("Conciliación (%)", f"{(iguales/total_lineas)*100:.2f}%")
-    col2.metric("Total Fusion", f"{comparativa['CANT_FUSION'].sum():,.0f}")
-    col3.metric("Total Infolog", f"{comparativa['CANT_INFOLOG'].sum():,.0f}")
-    col4.metric("Dif. Neta", f"{comparativa['Diferencia'].sum():,.0f}")
-    
-    col5.metric(
-        label="📦 Pallets Perdidos (Cajas / Plts)", 
-        value=f"{total_cajas_perdidas:,.0f} / {total_pallets_perdidos}", 
-        delta="Alerta" if total_pallets_perdidos > 0 else "Limpio", 
-        delta_color="inverse" if total_pallets_perdidos > 0 else "normal"
-    )
-
-    tab1, tab2, tab3 = st.tabs(["📊 Análisis General y Diferencias", "🔍 Auditoría de Estatus y Fechas", "🚨 Detalle Pallets Perdidos"])
-
-    with tab1:
-        st.subheader("Distribución de Diferencias")
-        fig = px.pie(comparativa, names='Tipo Error', color='Tipo Error',
-                     color_discrete_map={'OK':'#2ca02c', 'Falta en Infolog':'#ff7f0e', 'Falta en Fusion':'#d62728', 'Diferencia de Cantidad':'#1f77b4'})
-        st.plotly_chart(fig, use_container_width=True)
-
-        st.subheader("Detalle de Diferencias (Solo errores) con Vencimiento Seguro de Fusion")
-        solo_errores = comparativa[comparativa['Diferencia'] != 0].sort_values(by='Diferencia', ascending=False)
-        
-        solo_errores['Vencimiento'] = solo_errores['Vencimiento_str']
-        solo_errores['Caducidad'] = solo_errores['Caducidad_str']
-
-        columnas_reporte = ['SKU', 'LOTE', 'STATUS', 'CANT_FUSION', 'CANT_INFOLOG', 'Diferencia', 'Tipo Error', 'Vencimiento', 'Caducidad']
-        df_errores_final = solo_errores[columnas_reporte]
-
-        output = BytesIO()
-        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            df_errores_final.to_excel(writer, index=False, sheet_name='Errores_Inventario')
-        processed_data = output.getvalue()
-
-        st.download_button(
-            label="📥 Descargar Errores con Vencimientos Fusion (.xlsx)",
-            data=processed_data,
-            file_name="errores_y_vencimientos_fusion.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-        
-        def color_negativo_rojo(val):
-            if isinstance(val, (int, float)) and val < 0:
-                return 'color: #d62728; font-weight: bold;'
-            return ''
-
-        df_con_estilo = df_errores_final.style.format({
-            'CANT_FUSION': '{:,.0f}',
-            'CANT_INFOLOG': '{:,.0f}',
-            'Diferencia': '{:,.0f}'
-        }).map(color_negativo_rojo, subset=['Diferencia'])
-        
-        st.dataframe(df_con_estilo, use_container_width=True, hide_index=True)
-
-    with tab2:
-        st.subheader("🔍 Control Cruzado de Fechas (Prioridad: Infolog Vacío por Pallet)")
-        st.write("Se exponen los pallets individuales con fecha faltante en Infolog y luego los desvíos operativos mayores a 30 días.")
-        
-        if not df_fallas_fechas_pallet.empty:
-            st.error(f"⚠️ Se detectaron {len(df_fallas_fechas_pallet)} pallets con novedades o fallas de vencimiento.")
-            
-            # EXPORTAR CONTROL DE FECHAS A EXCEL (.xlsx)
-            output_fechas = BytesIO()
-            with pd.ExcelWriter(output_fechas, engine='xlsxwriter') as writer:
-                df_fallas_fechas_pallet.to_excel(writer, index=False, sheet_name='Control_Vencimientos')
-            processed_data_fechas = output_fechas.getvalue()
-
-            st.download_button(
-                label="📥 Descargar Reporte de Vencimientos por Pallet (.xlsx)",
-                data=processed_data_fechas,
-                file_name="reporte_auditoria_vencimientos.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-            
-            st.dataframe(df_fallas_fechas_pallet, use_container_width=True, hide_index=True)
+        if pd.isna(fecha_val) or fecha_val == "Sin Fecha": return pd.NaT
+        s = str(fecha_val).strip()
+        if "/" in s and len(s) <= 12: 
+            año = datetime.now().year
+            return pd.to_datetime(f"{s}/{año}", format="%d/%m %H:%M/%Y")
         else:
-            st.success("🎉 ¡Excelente! Todos los vencimientos están cargados en Infolog y cumplen con los deltas admitidos.")
+            dt = pd.to_datetime(s, utc=True)
+            return dt.tz_convert(None) - pd.Timedelta(hours=3)
+    except:
+        return pd.NaT
 
-        st.subheader("Mapeo General de Estatus")
+tab_operarios, tab_monitor, tab_supervisor = st.tabs(["📲 Vista Operativa", "📱 Monitor de Cargas", "⚙️ Carga de Reportes"])
+
+# ---------------------------------------------------------------------
+# PESTAÑA 1: VISTA OPERATIVA (PISTA)
+# ---------------------------------------------------------------------
+with tab_operarios:
+    st.subheader("Tablero de Estados de Armado")
+    
+    if st.session_state.demoras_pendientes:
+        st.error("🚨 ATENCIÓN: Tienes camiones marcados como DESPACHADA que superaron las 3 horas desde la cita. Es obligatorio ingresar un motivo para liberarlos.")
+        motivos = {}
+        for id_ent, datos in st.session_state.demoras_pendientes.items():
+            motivos[id_ent] = st.text_input(f"⚠️ Motivo para Orden {id_ent} (Demora: {datos['horas']:.1f} hs):", key=f"motivo_{id_ent}")
+            
+        if st.button("Confirmar Despachos Retrasados", type="primary"):
+            with st.spinner("Guardando justificaciones..."):
+                for id_ent, motivo_texto in motivos.items():
+                    payload = {
+                        "accion": "ACTUALIZAR_ESTADO", "Id_Entrega": id_ent,
+                        "Estado": "DESPACHADA", "Motivo_Demora": motivo_texto if motivo_texto else "Sin justificación ingresada"
+                    }
+                    requests.post(URL_GOOGLE_SCRIPT, data=json.dumps(payload))
+                st.session_state.demoras_pendientes = {} 
+                st.success("✅ Justificaciones guardadas. Despachos confirmados.")
+                st.rerun()
+        st.stop() 
+
+    if URL_GOOGLE_SCRIPT == "TU_NUEVA_URL_AQUI":
+        st.info("👆 Pega tu enlace de Google Script en la línea 12.")
+    else:
         try:
-            if 'df_info' in locals():
-                chequeo_mapeo = df_info[['STATUS_ORIGINAL', 'STATUS']].drop_duplicates().sort_values('STATUS_ORIGINAL')
-                chequeo_mapeo.columns = ['Código en Infolog (Original)', 'Se muestra en Dashboard como:']
-                st.dataframe(chequeo_mapeo, use_container_width=True, hide_index=True)
-            else:
-                st.info("Mostrando estatus de la última carga guardada:")
-                resumen_status = comparativa[['STATUS']].drop_duplicates().sort_values('STATUS')
-                st.dataframe(resumen_status, use_container_width=True, hide_index=True)
-        except Exception as e:
-            st.warning("No se puede mostrar el detalle del mapeo.")
-
-    with tab3:
-        st.subheader("🚨 Detalle de Pallets Perdidos en Infolog")
-        st.write("Registros que cumplen con estatus **VAC** o ubicaciones que inician con **A-998**.")
-        
-        if not df_reporte_perdidos.empty:
-            output_p = BytesIO()
-            with pd.ExcelWriter(output_p, engine='xlsxwriter') as writer:
-                df_reporte_perdidos.to_excel(writer, index=False, sheet_name='Pallets_Perdidos')
-            processed_data_p = output_p.getvalue()
-
-            st.download_button(
-                label="📥 Descargar Reporte de Pérdidas en Excel (.xlsx)",
-                data=processed_data_p,
-                file_name="reporte_pallets_perdidos.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+            respuesta = requests.get(URL_GOOGLE_SCRIPT)
+            datos_json = respuesta.json()
             
-            df_p_estilo = df_reporte_perdidos.style.format({'CAJAS': '{:,.0f}'})
-            st.dataframe(df_p_estilo, use_container_width=True, hide_index=True)
-        else:
-            st.success("🎉 ¡Excelente! No se registran pallets perdidos en la consulta actual.")
+            if respuesta.status_code == 200 and len(datos_json) > 0:
+                df_bd = pd.DataFrame(datos_json)
+                
+                if 'Cajas_Picking' in df_bd.columns: df_bd['Cajas_Picking'] = pd.to_numeric(df_bd['Cajas_Picking'], errors='coerce').fillna(0).astype(int)
+                if 'Pallets_Completos' in df_bd.columns: df_bd['Pallets_Completos'] = pd.to_numeric(df_bd['Pallets_Completos'], errors='coerce').fillna(0).astype(int)
+                if 'Average_Picking' in df_bd.columns: df_bd['Average_Picking'] = pd.to_numeric(df_bd['Average_Picking'], errors='coerce').fillna(0).astype(int)
+                if 'Orden_Carga' in df_bd.columns: df_bd['Orden_Carga'] = pd.to_numeric(df_bd['Orden_Carga'], errors='coerce').fillna(0).astype(int)
+                
+                df_bd = df_bd[df_bd['Estado'] != "DESPACHADA"]
+                
+                if df_bd.empty:
+                    st.success("🎉 Todas las órdenes activas han sido despachadas.")
+                else:
+                    # CÁLCULOS PARA LOS KPIs
+                    total_pedidos = len(df_bd)
+                    total_rutas = df_bd['Ruta'].nunique()
+                    df_ya_preparadas = df_bd[df_bd['Estado'].isin(ESTADOS_PREPARADOS)]
+                    
+                    df_pendientes = df_bd[~df_bd['Estado'].isin(ESTADOS_PREPARADOS)].copy()
+                    
+                    cajas_pendientes = df_bd['Cajas_Picking'].sum() - df_ya_preparadas['Cajas_Picking'].sum()
+                    pallets_pendientes = df_bd['Pallets_Completos'].sum() - df_ya_preparadas['Pallets_Completos'].sum()
+                    cajas_lanzadas = df_bd[df_bd['Estado'] == 'LANZADA']['Cajas_Picking'].sum()
+                    pedidos_listos = len(df_bd[df_bd['Estado'] == 'TOP SALIDA'])
+                    
+                    # --- NUEVO CÁLCULO DE HORAS DE PICKING ---
+                    df_pendientes['Productividad_Hr'] = np.where(df_pendientes['Average_Picking'] > 0, (df_pendientes['Average_Picking'] / 10.0) * 124.0, 124.0)
+                    df_pendientes['Horas_Estimadas'] = np.where(df_pendientes['Cajas_Picking'] > 0, df_pendientes['Cajas_Picking'] / df_pendientes['Productividad_Hr'], 0)
+                    horas_picking_decimal = df_pendientes['Horas_Estimadas'].sum()
+                    
+                    # Convertimos de decimal a formato HH:MM
+                    minutos_totales = int(horas_picking_decimal * 60)
+                    horas = minutos_totales // 60
+                    minutos = minutos_totales % 60
+                    horas_picking_str = f"{horas:02d}:{minutos:02d}"
+                    # -----------------------------------------
+                    
+                    k1, k2, k3, k4, k5, k6, k7 = st.columns(7)
+                    with k1: st.markdown(f"<div class='kpi-box'><div class='kpi-title'>Total Rutas</div><div class='kpi-value'>{total_rutas}</div></div>", unsafe_allow_html=True)
+                    with k2: st.markdown(f"<div class='kpi-box'><div class='kpi-title'>Órdenes Activas</div><div class='kpi-value'>{total_pedidos}</div></div>", unsafe_allow_html=True)
+                    with k3: st.markdown(f"<div class='kpi-box'><div class='kpi-title'>Pallets Ptes</div><div class='kpi-value'>{pallets_pendientes}</div></div>", unsafe_allow_html=True)
+                    with k4: st.markdown(f"<div class='kpi-box'><div class='kpi-title'>Cajas Ptes</div><div class='kpi-value'>{cajas_pendientes}</div></div>", unsafe_allow_html=True)
+                    with k5: st.markdown(f"<div class='kpi-box'><div class='kpi-title'>Horas Pick</div><div class='kpi-value'>{horas_picking_str}</div></div>", unsafe_allow_html=True)
+                    with k6: st.markdown(f"<div class='kpi-box'><div class='kpi-title'>Cajas Lanzadas</div><div class='kpi-value'>{cajas_lanzadas}</div></div>", unsafe_allow_html=True)
+                    with k7: st.markdown(f"<div class='kpi-box'><div class='kpi-title'>Top Salida</div><div class='kpi-value'>{pedidos_listos}</div></div>", unsafe_allow_html=True)
+                    
+                    st.write("---")
+                    
+                    if 'Fecha_Cita' in df_bd.columns:
+                        df_bd['dt_real'] = df_bd['Fecha_Cita'].apply(unificar_fechas)
+                        df_bd = df_bd.sort_values(by=['dt_real', 'Ruta', 'Orden_Carga'])
+                        df_bd['Fecha_Cita'] = df_bd['dt_real'].dt.strftime('%d/%m %H:%M').fillna("Sin Fecha")
+                    else:
+                        df_bd = df_bd.sort_values(by=['Ruta', 'Orden_Carga'])
+                        
+                    columnas_ver = ['Fecha_Cita', 'Ruta', 'Orden_Carga', 'Id_Entrega', 'Estado', 'Cliente', 'Transporte', 'Cajas_Picking', 'Pallets_Completos', 'Average_Picking', 'dt_real']
+                    columnas_ver = [c for c in columnas_ver if c in df_bd.columns]
+                    df_mostrar = df_bd[columnas_ver].copy()
+                    
+                    rutas_unicas = list(df_mostrar['Ruta'].unique())
+                    def resaltar_rutas(row):
+                        color = "rgba(128, 128, 128, 0.2)" if rutas_unicas.index(row['Ruta']) % 2 == 0 else "transparent"
+                        return [f"background-color: {color}"] * len(row)
+                    
+                    df_estilizado = df_mostrar.style.apply(resaltar_rutas, axis=1)
+                    
+                    columnas_deshabilitadas = ['Fecha_Cita', 'Ruta', 'Orden_Carga', 'Id_Entrega', 'Cliente', 'Transporte', 'Cajas_Picking', 'Pallets_Completos', 'Average_Picking', 'dt_real']
+                    
+                    if st.session_state.perfil == "Operacion":
+                        df_editado = st.data_editor(
+                            df_estilizado,
+                            column_config={"Estado": st.column_config.SelectboxColumn("Estado Actual", options=ESTADOS_LISTA, required=True), "dt_real": None}, 
+                            disabled=columnas_deshabilitadas,
+                            use_container_width=True, hide_index=True
+                        )
+                        if st.button("💾 Guardar Avance Operativo"):
+                            with st.spinner("Verificando Tiempos..."):
+                                cambios = df_editado.compare(df_mostrar) 
+                                if not cambios.empty:
+                                    for index in cambios.index:
+                                        nuevo_estado = str(df_editado.loc[index, 'Estado'])
+                                        id_entrega = str(df_editado.loc[index, 'Id_Entrega'])
+                                        
+                                        if nuevo_estado == "DESPACHADA" and 'dt_real' in df_mostrar.columns:
+                                            fecha_cita = df_mostrar.loc[index, 'dt_real']
+                                            ahora = datetime.now()
+                                            diferencia_horas = (ahora - fecha_cita).total_seconds() / 3600
+                                            
+                                            if diferencia_horas > 3:
+                                                st.session_state.demoras_pendientes[id_entrega] = {'horas': diferencia_horas}
+                                                continue 
+                                                
+                                        payload = {"accion": "ACTUALIZAR_ESTADO", "Id_Entrega": id_entrega, "Estado": nuevo_estado}
+                                        requests.post(URL_GOOGLE_SCRIPT, data=json.dumps(payload))
+                                        
+                                    if not st.session_state.demoras_pendientes:
+                                        st.success("✅ Estados actualizados.")
+                                    st.rerun()
+                    else:
+                        df_mostrar_vis = df_mostrar.drop(columns=['dt_real']) if 'dt_real' in df_mostrar.columns else df_mostrar
+                        df_estilizado_vis = df_mostrar_vis.style.apply(resaltar_rutas, axis=1)
+                        st.dataframe(df_estilizado_vis, use_container_width=True, hide_index=True)
+                        
+        except Exception as e:
+            st.error(f"Error conectando a la BD: {e}")
+
+# ---------------------------------------------------------------------
+# PESTAÑA 2: MONITOR DE CARGAS
+# ---------------------------------------------------------------------
+with tab_monitor:
+    st.subheader("🎯 Estado General por Horario de Cita")
+    if URL_GOOGLE_SCRIPT != "TU_NUEVA_URL_AQUI":
+        try:
+            resp_mon = requests.get(URL_GOOGLE_SCRIPT)
+            datos_mon = resp_mon.json()
+            if len(datos_mon) > 0:
+                df_mon = pd.DataFrame(datos_mon)
+                df_mon = df_mon[df_mon['Estado'] != "DESPACHADA"]
+                if 'Fecha_Cita' in df_mon.columns:
+                    df_mon['Fecha_Cita_dt'] = df_mon['Fecha_Cita'].apply(unificar_fechas)
+                    df_mon = df_mon.dropna(subset=['Fecha_Cita_dt'])
+                    df_mon['Fecha_Cita'] = df_mon['Fecha_Cita_dt'].dt.strftime('%d/%m %H:%M')
+                
+                if df_mon.empty:
+                    st.success("Todo despachado. Nada pendiente a monitorear.")
+                else:
+                    tz_arg = timezone(timedelta(hours=-3))
+                    ahora = datetime.now(tz_arg).replace(tzinfo=None)
+                    grupos = df_mon.groupby('Fecha_Cita')
+                    horarios_ordenados = df_mon[['Fecha_Cita', 'Fecha_Cita_dt']].drop_duplicates().sort_values('Fecha_Cita_dt')
+                    
+                    for _, row_hora in horarios_ordenados.iterrows():
+                        fecha_str, fecha_dt = row_hora['Fecha_Cita'], row_hora['Fecha_Cita_dt']
+                        grupo = grupos.get_group(fecha_str)
+                        minutos_desde_cita = (ahora - fecha_dt).total_seconds() / 60
+                        grupo['Peso_Estado'] = grupo['Estado'].map(ESTADO_PESO)
+                        peor_peso = grupo['Peso_Estado'].min()
+                        
+                        if peor_peso <= 2: foco = "🚀 FOCO: LANZAMIENTO"
+                        elif peor_peso <= 4: foco = "📦 FOCO: PREPARACIÓN"
+                        elif peor_peso <= 6: foco = "🔎 FOCO: CONTROL"
+                        else: foco = "🚛 FOCO: CARGA"
+                        
+                        if minutos_desde_cita >= 0: 
+                            if peor_peso < 7: clase_color, estado_tiempo = "card-red", "🚨 ROJO: Cita cumplida y faltan controlar"
+                            elif peor_peso < 9:
+                                if minutos_desde_cita <= 180: clase_color, estado_tiempo = "card-yellow", "🟡 AMARILLO: En ventana de 3hs"
+                                else: clase_color, estado_tiempo = "card-red", "🚨 ROJO: Vencieron las 3hs"
+                            else: clase_color, estado_tiempo = "card-green", "🟢 VERDE: Lista para despachar"
+                        else: clase_color, estado_tiempo = "card-green", f"🟢 VERDE: Faltan {int(abs(minutos_desde_cita))} min. para la cita"
+                        
+                        st.markdown(f"""
+                        <div class="monitor-card {clase_color}">
+                            <div class="card-title">⏰ Cita: {fecha_str}</div>
+                            <div class="card-text">{estado_tiempo}</div>
+                            <div class="card-text"><b>{len(grupo)}</b> Órdenes en este bloque.</div>
+                            <div class="card-foco">{foco}</div>
+                        </div>""", unsafe_allow_html=True)
+        except Exception as e: st.error(f"Error cargando monitor: {e}")
+
+# ---------------------------------------------------------------------
+# PESTAÑA 3: CARGA SUPERVISOR
+# ---------------------------------------------------------------------
+with tab_supervisor:
+    st.subheader("Subir Planificación del Día")
+    
+    if st.session_state.perfil != "Supervisor":
+        st.warning("⚠️ Solo el perfil 'Supervisor' tiene permisos para cargar nuevas planificaciones.")
+    else:
+        col1, col2 = st.columns(2)
+        with col1: file_plan = st.file_uploader("1. Reporte 'Planificación Dana' (Excel)", type=["xlsx", "xls"])
+        with col2: file_maestro = st.file_uploader("2. 'Maestro Materiales' (Excel)", type=["xlsx", "xls"])
+        
+        if st.button("Procesar y Cargar al Sistema"):
+            if file_plan and file_maestro:
+                try:
+                    df_plan = pd.read_excel(file_plan)
+                    
+                    df_plan = df_plan.rename(columns={
+                        "FechaHoraDespacho": 'Fecha_Cita', 
+                        "IdRuta": 'Ruta', 
+                        "Número de orden de ventas de origen": 'Orden_Entrega', 
+                        "IdEntrega": 'Id_Entrega', 
+                        "Nombre de organización": 'Cliente', 
+                        "IdTransportista": 'Transporte', 
+                        "Artículo": 'Codigo', 
+                        "Cantidad solicitada secundaria": 'Cantidad_Cajas',
+                        "OrdenCarga": 'Orden_Descarga' 
+                    })
+                    
+                    df_maestro = pd.read_excel(file_maestro).rename(columns={"Artículo - Nombre": 'Codigo', "LPK - Cajas por Pallet": 'LPK'})
+                    df_completo = pd.merge(df_plan, df_maestro[['Codigo', 'LPK']], on='Codigo', how='left')
+                    df_completo['Cantidad_Cajas'] = pd.to_numeric(df_completo['Cantidad_Cajas'], errors='coerce').fillna(0)
+                    df_completo['LPK'] = pd.to_numeric(df_completo['LPK'], errors='coerce').fillna(1) 
+                    
+                    fechas_excel = pd.to_datetime(df_completo['Fecha_Cita'], errors='coerce')
+                    if fechas_excel.dt.tz is not None: fechas_excel = fechas_excel.dt.tz_convert(None)
+                    fechas_excel = fechas_excel - pd.Timedelta(hours=3)
+                    df_completo['Fecha_Cita'] = fechas_excel.dt.strftime('%d/%m %H:%M').fillna("Sin Fecha")
+                    
+                    df_completo['Pallets_Completos'] = (df_completo['Cantidad_Cajas'] // df_completo['LPK']).astype(int)
+                    df_completo['Cajas_Picking'] = (df_completo['Cantidad_Cajas'] % df_completo['LPK']).astype(int)
+                    df_completo['Lineas_Picking'] = np.where(df_completo['Cajas_Picking'] > 0, 1, 0)
+                    
+                    df_agrupado = df_completo.groupby(['Fecha_Cita', 'Ruta', 'Orden_Entrega', 'Id_Entrega', 'Cliente', 'Transporte']).agg({
+                        'Cajas_Picking': 'sum', 
+                        'Pallets_Completos': 'sum', 
+                        'Lineas_Picking': 'sum',
+                        'Orden_Descarga': 'min'
+                    }).reset_index()
+                    
+                    df_agrupado['Average_Picking'] = np.where(df_agrupado['Lineas_Picking'] > 0, np.ceil(df_agrupado['Cajas_Picking'] / df_agrupado['Lineas_Picking']), 0).astype(int)
+                    
+                    if 'Orden_Descarga' in df_agrupado.columns:
+                        df_agrupado['Orden_Carga'] = df_agrupado.groupby('Ruta')['Orden_Descarga'].rank(ascending=False, method='min').fillna(1).astype(int)
+                    else:
+                        df_agrupado['Orden_Carga'] = 1
+                        
+                    if URL_GOOGLE_SCRIPT != "TU_NUEVA_URL_AQUI":
+                        try:
+                            resp = requests.get(URL_GOOGLE_SCRIPT)
+                            if resp.status_code == 200 and len(resp.json()) > 0:
+                                ids_existentes = pd.DataFrame(resp.json())['Id_Entrega'].astype(str).tolist()
+                                df_agrupado = df_agrupado[~df_agrupado['Id_Entrega'].astype(str).isin(ids_existentes)]
+                        except: pass 
+                                
+                    if df_agrupado.empty: st.warning("⚠️ Órdenes ya cargadas. Sin duplicados.")
+                    else:
+                        df_agrupado = df_agrupado.sort_values(by=['Fecha_Cita', 'Ruta', 'Orden_Carga'])
+                        st.success(f"✅ Se cargarán {len(df_agrupado)} órdenes nuevas:")
+                        if URL_GOOGLE_SCRIPT == "TU_NUEVA_URL_AQUI": st.warning("⚠️ Falta pegar la URL de Google.")
+                        else:
+                            with st.spinner("Enviando pedidos..."):
+                                for _, row in df_agrupado.iterrows():
+                                    payload = {
+                                        "accion": "CARGAR_PLAN", "Fecha_Cita": str(row['Fecha_Cita']), "Ruta": str(row['Ruta']), 
+                                        "Orden_Entrega": str(row['Orden_Entrega']), "Id_Entrega": str(row['Id_Entrega']), 
+                                        "Cliente": str(row['Cliente']), "Transporte": str(row['Transporte']), 
+                                        "Cajas_Picking": int(row['Cajas_Picking']), "Pallets_Completos": int(row['Pallets_Completos']), 
+                                        "Average_Picking": int(row['Average_Picking']), "Orden_Carga": int(row['Orden_Carga'])
+                                    }
+                                    requests.post(URL_GOOGLE_SCRIPT, data=json.dumps(payload))
+                                st.info("🚀 ¡Datos enviados!")
+                except Exception as e: st.error(f"❌ Ocurrió un error leyendo el Excel: {e}")

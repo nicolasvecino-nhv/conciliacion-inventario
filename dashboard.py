@@ -11,12 +11,10 @@ st.markdown("Comparación entre **Fusion** e **Infolog** para **NEWPGA**")
 
 # --- FUNCIONES DE MEMORIA AMPLIADAS ---
 def guardar_en_memoria(df_comparativa, df_perdidos, df_fallas_fechas, total_cajas, total_pallets):
-    # Guardamos los 3 DataFrames en disco local
     df_comparativa.to_pickle("ultima_comparativa.pkl")
     df_perdidos.to_pickle("ultimo_reporte_perdidos.pkl")
     df_fallas_fechas.to_pickle("ultimo_fallas_fechas.pkl")
     
-    # Guardamos los KPIs numéricos simples en un archivito de texto rápido
     with open("ultimas_metricas.txt", "w") as f:
         f.write(f"{total_cajas},{total_pallets}")
 
@@ -68,9 +66,6 @@ mapeo_estatus = {
     'VIC': 'Deposito',
     'REM': 'Deposito',
     'MUE': 'MuestrasDA',
-    'DAN': 'Scrap',
-    'VAS': 'Deposito',
-
 }
 
 comparativa = None
@@ -109,12 +104,14 @@ if file_fusion and file_infolog:
     # Normalización inicial de llaves
     df_fusion['SKU'] = df_fusion['SKU'].astype(str).str.strip()
     df_fusion['LOTE'] = df_fusion['LOTE'].astype(str).str.strip()
-    df_fusion['FECHA_VENC_FUSION'] = pd.to_datetime(df_fusion['FECHA_VENC_FUSION'], errors='coerce')
+    
+    # Lectura robusta de fechas en Fusion
+    df_fusion['FECHA_VENC_FUSION'] = pd.to_datetime(df_fusion['FECHA_VENC_FUSION'], dayfirst=True, errors='coerce')
 
     # MAESTRO INDEPENDIENTE DE FECHAS DE FUSION (Por SKU y Lote, ignorando el Estatus)
     maestro_fechas_fusion = df_fusion.dropna(subset=['FECHA_VENC_FUSION']).groupby(['SKU', 'LOTE'])['FECHA_VENC_FUSION'].first().reset_index()
 
-    # 3. IDENTIFICAR POSICIÓN, PALLET (COLUMNA U -> Índice 20) Y FECHA EN INFOLOG (COLUMNA W -> Índice 22)
+    # 3. IDENTIFICAR POSICIÓN, PALLET (COLUMNA U -> Índice 20) Y FECHA EN INFOLOG (COLUMNA V/W -> Índice 21/22)
     nombre_col_larga = "TRIM(GEPAL.ZONSTS||'-'|| RIGHT('000'||GEPAL.ALLSTS, 3) ||'-'|| RIGHT('0000'||GEPAL.DPLSTS, 4) ||'-'|| RIGHT('00'||GEPAL.NIVSTS, 2))"
     
     col_posicion_real = None
@@ -133,12 +130,15 @@ if file_fusion and file_infolog:
     else:
         df_info['PALLET'] = ""
 
-    # Captura de columna W (Fecha Vencimiento)
-    if len(df_info.columns) >= 23:
-        col_venc_info = df_info.columns[22]
-        df_info = df_info.rename(columns={col_venc_info: 'FECHA_VENC_INFOLOG'})
+    # Captura de fecha en Infolog (Buscamos preferentemente Columna V - DATFVI YYYYMMDD)
+    if len(df_info.columns) >= 22:
+        col_venc_info = df_info.columns[21] # Columna V (DATFVI)
+        df_info = df_info.rename(columns={col_venc_info: 'FECHA_VENC_INFOLOG_RAW'})
+    elif len(df_info.columns) >= 23:
+        col_venc_info = df_info.columns[22] # Columna W como respaldo
+        df_info = df_info.rename(columns={col_venc_info: 'FECHA_VENC_INFOLOG_RAW'})
     else:
-        df_info['FECHA_VENC_INFOLOG'] = pd.NaT
+        df_info['FECHA_VENC_INFOLOG_RAW'] = ""
 
     # Renombramos las columnas estándares de Infolog
     dicc_rename_info = {
@@ -154,7 +154,15 @@ if file_fusion and file_infolog:
     df_info['SKU'] = df_info['SKU'].astype(str).str.strip()
     df_info['LOTE'] = df_info['LOTE'].astype(str).str.strip()
     df_info['PALLET'] = df_info['PALLET'].astype(str).str.strip().replace(['nan', 'None', ''], '-')
-    df_info['FECHA_VENC_INFOLOG'] = pd.to_datetime(df_info['FECHA_VENC_INFOLOG'], errors='coerce')
+    
+    # 🆕 PARSEO ROBUSTO DE FECHAS DE INFOLOG (Soporta YYYYMMDD y DD/MM/YYYY)
+    raw_dates = df_info['FECHA_VENC_INFOLOG_RAW'].astype(str).str.strip().str.replace('.0', '', regex=False)
+    # Intentamos primero YYYYMMDD (Columna V)
+    parsed_v = pd.to_datetime(raw_dates, format='%Y%m%d', errors='coerce')
+    # Si falla, intentamos formato de fecha estándar (Columna W)
+    parsed_w = pd.to_datetime(raw_dates, dayfirst=True, errors='coerce')
+    # Combinamos ambas
+    df_info['FECHA_VENC_INFOLOG'] = parsed_v.fillna(parsed_w)
 
     # Forzar vacíos a 'Deposito' antes del mapeo
     df_info['STATUS_ORIGINAL'] = df_info['STATUS_ORIGINAL'].astype(str).str.strip().replace(['nan', 'None', ''], 'Deposito')
@@ -243,12 +251,11 @@ if file_fusion and file_infolog:
     else:
         df_fallas_fechas_pallet = pd.DataFrame()
 
-    # GUARDAR TODO EN MEMORIA LOCAL PARA QUE SEA TRANSVERSAL A CUALQUIER TERMINAL
+    # GUARDAR TODO EN MEMORIA LOCAL
     guardar_en_memoria(comparativa, df_reporte_perdidos, df_fallas_fechas_pallet, total_cajas_perdidas, total_pallets_perdidos)
     st.sidebar.success("✅ Datos procesados y guardados de forma global.")
 
 else:
-    # Si no hay archivos subidos, cargamos lo último que se guardó globalmente en el disco del servidor
     datos_memoria = cargar_de_memoria()
     if datos_memoria is not None:
         comparativa, df_reporte_perdidos, df_fallas_fechas_pallet, total_cajas_perdidas, total_pallets_perdidos = datos_memoria
@@ -324,7 +331,6 @@ if comparativa is not None:
         if not df_fallas_fechas_pallet.empty:
             st.error(f"⚠️ Se detectaron {len(df_fallas_fechas_pallet)} pallets con novedades o fallas de vencimiento.")
             
-            # EXPORTAR CONTROL DE FECHAS A EXCEL (.xlsx)
             output_fechas = BytesIO()
             with pd.ExcelWriter(output_fechas, engine='xlsxwriter') as writer:
                 df_fallas_fechas_pallet.to_excel(writer, index=False, sheet_name='Control_Vencimientos')

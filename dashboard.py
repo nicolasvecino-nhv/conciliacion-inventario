@@ -57,7 +57,7 @@ mapeo_estatus = {
     'LAO': 'Deposito',
     'PAN': 'Deposito',
     'DPG': 'Deposito',
-    'DAN': 'Deposito',
+    'DAN': 'Scrap',
     'VAC': 'Deposito',
     'nan': 'Deposito',
     '': 'Deposito',

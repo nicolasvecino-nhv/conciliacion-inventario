@@ -229,7 +229,7 @@ if file_fusion and file_infolog:
             return "OK"
             
         delta_dias = (f_info - f_fusion).days
-        if delta_dias > 0 or delta_dias < -30:
+        if delta_dias > 0 or delta_dias < -45:
             return "Falla Vencimiento (Desvío)"
         return "OK"
 

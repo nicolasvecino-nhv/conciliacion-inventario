@@ -57,7 +57,7 @@ mapeo_estatus = {
     'LAO': 'Deposito',
     'PAN': 'Deposito',
     'DPG': 'Deposito',
-    'DAN': 'Scrap',
+    'DAN': 'Deposito',
     'VAC': 'Deposito',
     'nan': 'Deposito',
     '': 'Deposito',
@@ -66,7 +66,6 @@ mapeo_estatus = {
     'VIC': 'Deposito',
     'REM': 'Deposito',
     'MUE': 'MuestrasDA',
-    'VAS':'Deposito',
 }
 
 comparativa = None
@@ -156,17 +155,18 @@ if file_fusion and file_infolog:
     df_info['LOTE'] = df_info['LOTE'].astype(str).str.strip()
     df_info['PALLET'] = df_info['PALLET'].astype(str).str.strip().replace(['nan', 'None', ''], '-')
     
-    # 🆕 PARSEO ROBUSTO DE FECHAS DE INFOLOG (Soporta YYYYMMDD y DD/MM/YYYY)
+    # PARSEO ROBUSTO DE FECHAS DE INFOLOG (Soporta YYYYMMDD y DD/MM/YYYY)
     raw_dates = df_info['FECHA_VENC_INFOLOG_RAW'].astype(str).str.strip().str.replace('.0', '', regex=False)
-    # Intentamos primero YYYYMMDD (Columna V)
     parsed_v = pd.to_datetime(raw_dates, format='%Y%m%d', errors='coerce')
-    # Si falla, intentamos formato de fecha estándar (Columna W)
     parsed_w = pd.to_datetime(raw_dates, dayfirst=True, errors='coerce')
-    # Combinamos ambas
     df_info['FECHA_VENC_INFOLOG'] = parsed_v.fillna(parsed_w)
 
     # Forzar vacíos a 'Deposito' antes del mapeo
     df_info['STATUS_ORIGINAL'] = df_info['STATUS_ORIGINAL'].astype(str).str.strip().replace(['nan', 'None', ''], 'Deposito')
+
+    # 🆕 FILTRO ESTATUS 'COM': Excluimos todos los registros COM de Infolog
+    df_info = df_info[df_info['STATUS_ORIGINAL'] != 'COM'].copy()
+
     df_info['STATUS'] = df_info['STATUS_ORIGINAL'].map(mapeo_estatus).fillna(df_info['STATUS_ORIGINAL'])
     
     if 'POSICION' in df_info.columns:
@@ -229,7 +229,7 @@ if file_fusion and file_infolog:
             return "OK"
             
         delta_dias = (f_info - f_fusion).days
-        if delta_dias > 0 or delta_dias < -45:
+        if delta_dias > 0 or delta_dias < -30:
             return "Falla Vencimiento (Desvío)"
         return "OK"
 
@@ -241,7 +241,6 @@ if file_fusion and file_infolog:
     # Filtramos para el reporte únicamente los desvíos (Anomalías o Vacíos)
     df_anomalias_fecha = audit_pallets[audit_pallets['Estado Fecha'].isin(["🚨 Infolog sin Fecha", "Falla Vencimiento (Desvío)"])].copy()
     
-    # Ordenamos asignando máxima prioridad a las fechas vacías en Infolog
     if not df_anomalias_fecha.empty:
         df_anomalias_fecha['prioridad'] = df_anomalias_fecha['Estado Fecha'].apply(lambda x: 0 if "sin Fecha" in x else 1)
         df_anomalias_fecha = df_anomalias_fecha.sort_values(by=['prioridad', 'SKU', 'LOTE']).drop(columns=['prioridad'])
